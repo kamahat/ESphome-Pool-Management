@@ -1,0 +1,67 @@
+# ============================================================
+# pack_181/electrolyse.yaml
+# Protection de l'électrolyseur par redémarrage périodique
+#
+# Principe:
+#   - Un compteur (electrolyse_running_time) est incrémenté de 5 min
+#     toutes les 5 min via time.on_time dans le fichier principal
+#   - Quand il dépasse electrolyse_running_threshold:
+#       -> pause 120s puis redémarrage (script_pause_electrolyse)
+#       -> reset du compteur (script_init_electrolyseur)
+#
+# Dépendances:
+#   - switch id: electrolyse_relay (pompe.yaml)
+# ============================================================
+
+globals:
+  # Compteur de fonctionnement continu de l'électrolyseur (en minutes)
+  - id: electrolyse_running_time
+    type: int
+    initial_value: '0'
+    restore_value: true
+
+number:
+  # Délai de temporisation générale (usage divers)
+  - platform: template
+    name: Delay time
+    icon: mdi:timer-pause
+    initial_value: 20
+    min_value: 10
+    max_value: 600
+    step: 10
+    mode: slider
+    optimistic: true
+
+  # Durée max de fonctionnement continu avant pause forcée (minutes)
+  # Valeur recommandée: 130-140 min selon fabricant
+  - platform: template
+    name: Temps Electrolyse
+    id: electrolyse_running_threshold
+    icon: mdi:timer-pause
+    initial_value: 135
+    min_value: 60
+    max_value: 280
+    step: 5
+    mode: slider
+    optimistic: true
+
+script:
+  # Pause 120s puis redémarrage de l'électrolyseur
+  - id: script_pause_electrolyse
+    mode: restart
+    then:
+      - switch.turn_off: electrolyse_relay
+      - logger.log:
+          format: "ELECTROLYSE: Pause 120s avant redemarrage"
+          level: INFO
+      - delay: 120s
+      - switch.turn_on: electrolyse_relay
+      - logger.log: "ELECTROLYSE: Redemarrage effectue"
+
+  # Reset du compteur de fonctionnement
+  - id: script_init_electrolyseur
+    then:
+      - globals.set:
+          id: electrolyse_running_time
+          value: '0'
+      - logger.log: "ELECTROLYSE: Compteur remis à zéro"

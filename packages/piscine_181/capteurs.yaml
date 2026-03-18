@@ -1,0 +1,228 @@
+# ============================================================
+# pack_181/capteurs.yaml
+#
+# Contenu:
+#   - Production solaire HA (condition démarrage pompe)
+#   - Signal WiFi
+#   - BME280 : T°/Pression/Humidité ambiante (= temp_ext hors gel)
+#   - Dallas dallasng : T° eau piscine
+#   - ADS1115 ch A2 : tension brute capteur pression filtre
+#   - Template : pression filtre calculée en Bar
+#   - Duty_time : compteur temps filtration journalier
+#   - Binary sensor : statut ESP + pompe en fonctionnement
+#   - Text sensors : affichage horaire filtration + diagnostic
+#
+# Substitutions utilisées : ${friendly_name}, ${pression_max}
+#
+# IDs exportés vers d'autres packages :
+#   production_solaire          -> filtration.yaml
+#   bme280_temperature          -> hors_gel.yaml (temp_ext)
+#   temp_piscine                -> filtration.yaml
+#   pression_filtre             -> hors_gel.yaml (analog_threshold)
+#   ppe_filt_en_fonctionnement  -> duty_time ci-dessous
+#   _temps_fonctionnement_ppe_piscine_jour -> piscine-181.yaml (reset minuit)
+#   aff_heure_filtration        -> filtration.yaml + pompe.yaml
+#   ${friendly_name}_text_sensor_shutdown  -> piscine-181.yaml (on_time_sync)
+#   ${friendly_name}_text_in_sync          -> piscine-181.yaml (on_time_sync)
+# ============================================================
+
+# ============================================================
+# BINARY SENSORS
+# ============================================================
+binary_sensor:
+  # Statut connexion ESP <-> Home Assistant
+  - platform: status
+    name: "ESP Piscine Status"
+
+  # Pompe en fonctionnement : basé sur l'état du relais physique
+  # Utilisé par le duty_time _temps_fonctionnement_ppe_piscine_jour
+  - platform: template
+    name: "Ppe_en_fonctionnement"
+    id: ppe_filt_en_fonctionnement
+    lambda: |-
+      return id(pool_pump_relay).state;
+
+# ============================================================
+# SENSORS
+# ============================================================
+sensor:
+
+  # ---- Production solaire (depuis Home Assistant) ----
+  # Conditionne le démarrage de la pompe en modes Classique et Abaque
+  # Seuil configurable via number "seuil_solaire" dans filtration.yaml
+  - platform: homeassistant
+    name: "Production Solaire"
+    id: production_solaire
+    entity_id: sensor.envoy_122028037777_current_power_production
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    filters:
+      - filter_out: nan
+
+  # ---- Signal WiFi ----
+  - platform: wifi_signal
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: diagnostic
+
+  - platform: copy
+    source_id: wifi_signal_db
+    name: "WiFi Signal Percent"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "Signal %"
+    entity_category: diagnostic
+    device_class: ""
+
+  # ---- BME280 @ 0x76 - Ambiance extérieure ----
+  # bme280_temperature sert de "temp_ext" pour hors_gel.yaml
+  - platform: bme280_i2c
+    temperature:
+      name: "Temperature Exterieur"
+      id: bme280_temperature
+      oversampling: 16x
+      filters:
+        - median
+    pressure:
+      name: "BME280 Pressure"
+      id: bme280_pressure
+      filters:
+        - median
+    humidity:
+      name: "BME280 Humidity"
+      id: bme280_humidity
+      filters:
+        - median
+    address: 0x76
+    update_interval: 60s
+
+  - platform: absolute_humidity
+    name: "Absolute Humidity"
+    temperature: bme280_temperature
+    humidity: bme280_humidity
+    filters:
+      - round: 2
+
+  - platform: template
+    name: "Dew Point"
+    lambda: |-
+      return (243.5*(log(id(bme280_humidity).state/100)+((17.67*id(bme280_temperature).state)/
+      (243.5+id(bme280_temperature).state)))/(17.67-log(id(bme280_humidity).state/100)-
+      ((17.67*id(bme280_temperature).state)/(243.5+id(bme280_temperature).state))));
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-alert
+    accuracy_decimals: 2
+    filters:
+      - round: 2
+
+  # ---- Dallas dallasng GPIO13 - T° eau piscine ----
+  # Alimente g_memoire_temp_eau via filtration.yaml
+  - platform: dallasng
+    name: "T° Piscine"
+    id: temp_piscine
+    resolution: 10
+    address: 0x67041663d082ff28
+    icon: mdi:pool-thermometer
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - filter_out: nan
+      - filter_out: 85.0
+      - filter_out: NAN
+      - round: 1
+
+  # ---- ADS1115 ch A2 - Tension brute capteur pression ----
+  # Gain 4.096V / résolution 16 bits => précision ~0.06 bar
+  # disabled_by_default: visible dans HA mais désactivé par défaut
+  - platform: ads1115
+    multiplexer: 'A2_GND'
+    name: "ADS1115 Channel A2-GND"
+    id: ${friendly_name}_adc_pression_filtre
+    gain: 4.096
+    resolution: 16 bits
+    accuracy_decimals: 5
+    update_interval: 30s
+    device_class: voltage
+    state_class: measurement
+    icon: mdi:gauge
+    unit_of_measurement: mV
+    internal: false
+    disabled_by_default: true
+    filters:
+      - multiply: 1000
+      - clamp:
+          min_value: 0
+          max_value: 3300
+          ignore_out_of_range: false
+      - round: 0
+
+  # ---- Pression filtre calculée (template) ----
+  # Capteur 30PSI : 0.5V=0bar / 2.5V=1.03bar / 4.5V=2.07bar
+  # id "pression_filtre" requis par hors_gel.yaml (analog_threshold)
+  - platform: template
+    id: pression_filtre
+    name: "Pression filtre"
+    unit_of_measurement: "Bar"
+    accuracy_decimals: 2
+    update_interval: 30s
+    filters:
+      - calibrate_linear:
+          method: least_squares
+          datapoints:
+            - 0   -> 0.0
+            - 520 -> 0.4
+            - 683 -> 0.6
+            - 876 -> 0.68
+      - exponential_moving_average:
+          alpha: 0.1
+          send_every: 2
+      - round: 2
+    lambda: |-
+      if (id(${friendly_name}_adc_pression_filtre).state) {
+        return fabs(id(${friendly_name}_adc_pression_filtre).state);
+      } else {
+        return 0.0;
+      }
+
+  # ---- Temps de fonctionnement pompe (journalier) ----
+  # Remis à zéro à minuit via lambda dans piscine-181.yaml
+  # Surveille l'état du relais physique pool_pump_relay
+  - platform: duty_time
+    id: _temps_fonctionnement_ppe_piscine_jour
+    name: temps_ma_ppe_piscine_jour
+    sensor: ppe_filt_en_fonctionnement
+    restore: true
+    filters:
+      - round: 0
+
+# ============================================================
+# TEXT SENSORS
+# ============================================================
+text_sensor:
+  # Affichage plage horaire filtration active
+  # Format modes auto : "HH:MM / HH:MM(pivot) / HH:MM"
+  # Format modes forcés : "Ma_force" / "At_force" / "Hors-Gel"
+  - platform: template
+    id: aff_heure_filtration
+    name: affich_heure_filtration
+    icon: mdi:timer
+
+  # Heure d'extinction programmée (renseignée à la synchro horaire)
+  - platform: template
+    id: ${friendly_name}_text_sensor_shutdown
+    name: "Auto-shutdown All Relay at"
+    icon: mdi:power
+    update_interval: never
+    entity_category: diagnostic
+
+  # Statut de la dernière synchronisation horaire avec HA
+  - platform: template
+    id: ${friendly_name}_text_in_sync
+    name: "Time Sync"
+    icon: mdi:timer-sync
+    update_interval: never
+    entity_category: diagnostic

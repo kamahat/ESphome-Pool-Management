@@ -32,6 +32,13 @@ globals:
     restore_value: no
     initial_value: 'false'
 
+  # Timestamp Unix de la dernière réception d'une T° BLE valide
+  # Initialisé à 0 = jamais reçu. Mis à jour par on_value dans capteurs.yaml
+  - id: g_ble_temp_last_update
+    type: int
+    restore_value: no
+    initial_value: '0'
+
   - id: g_tps_filtration   # Durée calculée en heures
     type: float
     restore_value: no
@@ -101,7 +108,7 @@ globals:
 
 select:
   - platform: template
-    name: "Mode_Fonctionnement_filtration"
+    name: "Mode Fonctionnement Filtration"
     id: _Mode_Fonctionnement_filtration
     optimistic: true
     restore_value: true
@@ -118,7 +125,7 @@ datetime:
   - platform: template
     id: heure_pivot
     type: time
-    name: heure_pivot
+    name: "Heure Pivot"
     optimistic: yes
     initial_value: "13:30:00"
     restore_value: true
@@ -126,7 +133,7 @@ datetime:
   - platform: template
     id: h_debut
     type: time
-    name: h_debut
+    name: "Heure Début Filtration"
     optimistic: yes
     initial_value: "00:00:00"
     restore_value: false
@@ -134,7 +141,7 @@ datetime:
   - platform: template
     id: h_fin
     type: time
-    name: h_fin
+    name: "Heure Fin Filtration"
     optimistic: yes
     initial_value: "00:00:00"
     restore_value: false
@@ -142,7 +149,7 @@ datetime:
   - platform: template
     id: duree_filtration_calc
     type: time
-    name: duree_filtration
+    name: "Durée Filtration"
     optimistic: yes
     initial_value: "00:00:00"
     restore_value: false
@@ -150,7 +157,7 @@ datetime:
   - platform: template
     id: debut_mode_horaire
     type: time
-    name: debut_mode_horaire
+    name: "Début Mode Horaire"
     optimistic: yes
     initial_value: "08:00:00"
     restore_value: true
@@ -158,14 +165,14 @@ datetime:
   - platform: template
     id: duree_mode_horaire
     type: time
-    name: duree_mode_horaire
+    name: "Durée Mode Horaire"
     optimistic: yes
     initial_value: "08:00:00"
     restore_value: true
 
 number:
   - platform: template
-    name: tempo_recirculation
+    name: "Tempo Recirculation"
     id: tempo_mesure_temp
     optimistic: true
     restore_value: true
@@ -178,7 +185,7 @@ number:
     initial_value: 120
 
   - platform: template
-    name: coeff_Filtration
+    name: "Coefficient Filtration"
     id: coeff_filtration
     optimistic: true
     restore_value: true
@@ -191,7 +198,7 @@ number:
     initial_value: 100
 
   - platform: template
-    name: "Durée-Arret_jour"
+    name: "Durée Arrêt Journalier"
     id: duree_at_jour
     optimistic: true
     restore_value: true
@@ -204,7 +211,7 @@ number:
 
   # Seuil solaire pour modes Classique/Abaque (0 = désactivé)
   - platform: template
-    name: "Seuil solaire filtration"
+    name: "Seuil Solaire Filtration"
     id: seuil_solaire
     optimistic: true
     restore_value: true
@@ -218,7 +225,7 @@ number:
 
 button:
   - platform: template
-    name: BP_arret_jour
+    name: "Arrêt Filtration Journée"
     id: _arret_jour
     on_press:
       then:
@@ -244,18 +251,46 @@ interval:
       - script.execute: _memorisation_temperature_eau
 
 script:
-  # Mémorise T° eau seulement après la tempo de recirculation
+  # Sélection de la source de T° eau et mémorisation dans g_memoire_temp_eau
+  #
+  # Priorité :
+  #   Pompe ON + tempo écoulée  -> Dallas (mesure en circuit, plus fiable)
+  #   Pompe OFF + BLE < 1h      -> BLE Blue Connect (eau au repos, valide)
+  #   Pompe OFF + BLE >= 1h     -> conservation de la dernière valeur mémorisée
   - id: _memorisation_temperature_eau
     then:
       - if:
+          # CAS 1 : pompe en marche et T° eau stabilisée après recirculation
           condition:
             lambda: 'return id(flag_tempo_ppe_filtre) && !isnan(id(temp_piscine).state);'
           then:
             - lambda: 'id(g_memoire_temp_eau) = id(temp_piscine).state;'
-      - logger.log:
-          format: "TEMP: Flag=%i / Dallas=%.2f°C / Memo=%.2f°C"
-          args: [ 'id(flag_tempo_ppe_filtre)', 'id(temp_piscine).state', 'id(g_memoire_temp_eau)' ]
-          level: DEBUG
+            - logger.log:
+                format: "TEMP: Source=Dallas / T°=%.1f°C"
+                args: [ 'id(g_memoire_temp_eau)' ]
+                level: DEBUG
+          else:
+            # CAS 2 : pompe arrêtée -> BLE si valeur fraîche (< 3600s)
+            - if:
+                condition:
+                  lambda: |-
+                    if (isnan(id(temp_eau_ble).state)) return false;
+                    if (!id(ha_time).now().is_valid())  return false;
+                    if (id(g_ble_temp_last_update) == 0) return false;
+                    int age = id(ha_time).now().timestamp - id(g_ble_temp_last_update);
+                    return age < 3600;
+                then:
+                  - lambda: 'id(g_memoire_temp_eau) = id(temp_eau_ble).state;'
+                  - logger.log:
+                      format: "TEMP: Source=BLE / T°=%.1f°C / Age=%ds"
+                      args: [ 'id(g_memoire_temp_eau)',
+                              'id(ha_time).now().timestamp - id(g_ble_temp_last_update)' ]
+                      level: DEBUG
+                else:
+                  - logger.log:
+                      format: "TEMP: BLE indisponible ou trop ancienne -> conservation %.1f°C"
+                      args: [ 'id(g_memoire_temp_eau)' ]
+                      level: DEBUG
 
   # Calcul durée + décision pompe selon le mode actif
   - id: _fonctionnement_filtration

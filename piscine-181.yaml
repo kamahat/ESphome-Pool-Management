@@ -1,0 +1,208 @@
+# ============================================================
+# piscine-181.yaml  -  Fichier principal
+#
+# Matériel: ESP32 WROOM 32U az-delivery-devkit-v4 / Carte R4G4DL
+#
+# Structure packages:
+#   common/wifi-iot.yaml      <- wifi, uptime, OTA base
+#   common/base.yaml          <- entités de base communes
+#   common/esp32.yaml         <- config framework ESP32
+#   common/network-service.yaml
+#   pack_181/capteurs.yaml    <- BME280, Dallas, ADS1115, pression, duty_time
+#   pack_181/pompe.yaml       <- relais, séquences démarrage/extinction
+#   pack_181/filtration.yaml  <- modes Palier/Classique/Abaque/Horaire/Ma_f/At_f
+#   pack_181/electrolyse.yaml <- timer protection électrolyseur
+#   pack_181/hors_gel.yaml    <- protection antigel + alarme pression filtre
+#
+# GPIO Map:
+#   GPIO25  Relay-1 : Lumière piscine
+#   GPIO26  Relay-2 : pH-mètre
+#   GPIO33  Relay-3 : Électrolyseur
+#   GPIO32  Relay-4 : Pompe filtration
+#   GPIO4   LED Wifi status (inverted)
+#   GPIO12  Buzzer RTTTL
+#   GPIO13  Dallas 1-Wire (dallasng)
+#   GPIO16  UART RX (mod_bus)
+#   GPIO17  UART TX (mod_bus)
+#   GPIO21  I2C SDA
+#   GPIO22  I2C SCL
+#   ADS1115 @ 0x48 ch A2 : capteur pression filtre
+#   BME280  @ 0x76       : ambiance (= temp_ext pour hors gel)
+# ============================================================
+
+substitutions:
+  device_name: piscine-${net.octet1}
+  friendly_name: esp_${net.octet1}
+  device_description: "Pilotage Piscine Local Piscine"
+  device_area: "Piscine"
+  board: az-delivery-devkit-v4
+  pression_max: "1.5"   # Seuil alarme pression filtre en Bar
+  net:
+    octet1: "181"
+    IP1: 192.168.80.${net.octet1}
+
+# ============================================================
+# ESPHOME
+# ============================================================
+esphome:
+  name: ${device_name}
+  area: ${device_area}
+  comment: ${device_description}
+  on_boot:
+    priority: 200
+    then:
+      # Macro CONVERT_SECONDS utilisée par filtration.yaml
+      # Doit être déclarée avant tout script qui l'utilise
+      - lambda: |-
+          #define CONVERT_SECONDS(total_seconds, hh, mm, ss) \
+          do { \
+            int total = static_cast<int>(total_seconds); \
+            hh = total / 3600; \
+            int r = total - hh * 3600; \
+            mm = r / 60; \
+            ss = r - mm * 60; \
+            hh = std::min(hh, 23); \
+            mm = std::min(mm, 59); \
+            ss = std::min(ss, 59); \
+          } while (0)
+
+# ============================================================
+# PACKAGES
+# ============================================================
+packages:
+  # --- Communs (wifi, uptime, base ESP32) ---
+  wifi:            !include common/wifi-iot.yaml
+  device_base:     !include common/base.yaml
+  esp32:           !include common/esp32.yaml
+  network_service: !include common/network-service.yaml
+  # --- Spécifiques piscine-181 ---
+  capteurs:    !include packages/piscine_181/capteurs.yaml
+  pompe:       !include packages/piscine_181/pompe.yaml
+  filtration:  !include packages/piscine_181/filtration.yaml
+  electrolyse: !include packages/piscine_181/electrolyse.yaml
+  hors_gel:    !include packages/piscine_181/hors_gel.yaml
+
+# ============================================================
+# ESP32
+# ============================================================
+esp32:
+  board: ${board}
+  framework:
+    type: esp-idf
+
+# ============================================================
+# API / OTA / LOGGER
+# ============================================================
+api:
+  encryption:
+    key: !secret api_key_esp-181
+
+ota:
+  - platform: esphome
+    password: !secret ota_esp-181
+
+logger:
+  level: debug
+  logs:
+    component: ERROR
+
+# ============================================================
+# HARDWARE BAS NIVEAU
+# ============================================================
+status_led:
+  pin:
+    number: GPIO4
+    inverted: true
+
+output:
+  - platform: ledc
+    pin: GPIO12
+    id: rtttl_out
+
+uart:
+  - id: mod_bus
+    rx_pin: GPIO16
+    tx_pin: GPIO17
+    baud_rate: 115200
+    data_bits: 8
+    parity: NONE
+
+external_components:
+  - source: github://nrandell/dallasng
+
+dallasng:
+  - pin: GPIO13
+    update_interval: 120s
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+  id: i2c_1
+
+ads1115:
+  - address: 0x48
+
+# ============================================================
+# TIME - Source: Home Assistant
+# Centralise tous les déclenchements horaires pour éviter
+# la fragmentation entre packages
+# ============================================================
+time:
+  - platform: homeassistant
+    id: ha_time
+
+    on_time_sync:
+      if:
+        condition:
+          time.has_time:
+        then:
+          - text_sensor.template.publish:
+              id: ${friendly_name}_text_sensor_shutdown
+              state: "00h05"
+          - text_sensor.template.publish:
+              id: ${friendly_name}_text_in_sync
+              state: "Synchro Time avec Home Assistant"
+          - logger.log: "TIME: Synchronisé avec Home Assistant"
+          - script.execute: _fonctionnement_filtration
+
+    on_time:
+      # Toutes les 5 min: timer électrolyseur (electrolyse.yaml)
+      - seconds: 0
+        minutes: /5
+        then:
+          - lambda: |-
+              if (id(electrolyse_relay).state) {
+                if (id(electrolyse_running_time) > id(electrolyse_running_threshold).state) {
+                  id(script_pause_electrolyse).execute();
+                  id(script_init_electrolyseur).execute();
+                } else {
+                  id(electrolyse_running_time) += 5;
+                  ESP_LOGI("electrolyse", "Fonctionnement: %d min / Seuil: %.0f min",
+                    id(electrolyse_running_time),
+                    id(electrolyse_running_threshold).state);
+                }
+              }
+
+      # 00h00: reset compteur filtration journalier (capteurs.yaml)
+      - seconds: 0
+        minutes: 0
+        hours: 0
+        then:
+          - lambda: 'id(_temps_fonctionnement_ppe_piscine_jour).reset();'
+          - logger.log: "TIME: Reset compteur filtration journalier"
+
+      # 00h05: extinction automatique de tous les équipements (pompe.yaml)
+      - seconds: 0
+        minutes: 5
+        hours: 0
+        then:
+          if:
+            condition:
+              time.has_time:
+            then:
+              - script.execute: script_shutdown
+            else:
+              - logger.log:
+                  format: "SHUTDOWN: Heure non synchronisée, extinction annulée"
+                  level: WARN

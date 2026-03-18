@@ -1,0 +1,211 @@
+# ============================================================
+# pack_181/hors_gel.yaml
+# Protection antigel automatique de la piscine
+# + Alarme pression filtre (mesure_pression.yaml intégré)
+#
+# HORS GEL:
+#   Testé toutes les 15 min (interval 900s)
+#   temp_ext = bme280_temperature (capteur ambiant BME280 sur 181)
+#
+#   Cas 1 - T > Seuil1:        pas de risque -> reset flag
+#   Cas 2 - Seuil2 < T < Seuil1: risque léger -> pompe ON 15 min
+#   Cas 3 - T < Seuil2:           risque sévère -> pompe ON 30 min
+#
+#   Le flag g_flag_hg est lu par filtration.yaml (priorité P2)
+#   Un event HA "esphome.piscine_alarme" est émis à chaque cycle
+#   -> Créer une automation HA sur cet event pour les notifications
+#
+# ALARME PRESSION:
+#   binary_sensor analog_threshold sur pression_filtre
+#   Seuil = ${pression_max} (défini dans substitutions du fichier principal)
+#
+# Dépendances:
+#   - sensor id: bme280_temperature  (capteurs.yaml)
+#   - sensor id: pression_filtre     (capteurs.yaml)
+#   - switch id: cde_ppe_filtration  (pompe.yaml) via g_flag_hg -> filtration.yaml
+# ============================================================
+
+globals:
+  # Flag prioritaire: true = la pompe doit tourner pour éviter le gel
+  # restore_value: yes -> survit à un redémarrage ESP en plein cycle hors-gel
+  - id: g_flag_hg
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
+# ============================================================
+# SELECT - Activation du mode hors gel
+# ============================================================
+select:
+  - platform: template
+    name: "Mode_Hors_Gel"
+    id: _Mode_Fonctionnement_hg
+    optimistic: true
+    restore_value: true
+    options:
+      - Desactivé
+      - Activé
+    on_value:
+      then:
+        - logger.log:
+            format: "HORS-GEL: Mode -> %s"
+            args: [ 'id(_Mode_Fonctionnement_hg).current_option()' ]
+            level: INFO
+
+# ============================================================
+# NUMBER - Seuils de température
+# ============================================================
+number:
+  # Seuil 1: en dessous -> risque léger, pompe 15 min
+  - platform: template
+    name: "Seuil1_Temp_HG"
+    id: s1_temp_hg
+    optimistic: true
+    restore_value: true
+    mode: box
+    min_value: -5
+    max_value: 3
+    device_class: temperature
+    unit_of_measurement: "°C"
+    step: 0.1
+    initial_value: 1.0
+
+  # Seuil 2: en dessous -> risque sévère, pompe 30 min
+  - platform: template
+    name: "Seuil2_Temp_HG"
+    id: s2_temp_hg
+    optimistic: true
+    restore_value: true
+    mode: box
+    min_value: -10
+    max_value: 0
+    device_class: temperature
+    unit_of_measurement: "°C"
+    step: 0.1
+    initial_value: -2.0
+
+# ============================================================
+# BINARY SENSOR - Alarme pression filtre (mesure_pression.yaml)
+# ============================================================
+binary_sensor:
+  # True si pression > ${pression_max} bar
+  # Emet un event HA pour notification (Telegram, mobile, etc.)
+  - platform: analog_threshold
+    name: "Etat_pression_Filtre"
+    id: _etat_pression_filtre
+    sensor_id: pression_filtre
+    threshold: ${pression_max}
+    on_press:
+      - logger.log:
+          format: "ALARME: Pression filtre HAUTE > %.1f bar (%.3f bar)"
+          args: [ 'float(${pression_max})', 'id(pression_filtre).state' ]
+          level: WARN
+      - homeassistant.event:
+          event: esphome.piscine_alarme
+          data:
+            type: pression_haute
+            valeur: !lambda 'return std::to_string(id(pression_filtre).state);'
+    on_release:
+      - logger.log:
+          format: "INFO: Pression filtre normale (%.3f bar)"
+          args: [ 'id(pression_filtre).state' ]
+          level: INFO
+      - homeassistant.event:
+          event: esphome.piscine_alarme
+          data:
+            type: pression_normale
+            valeur: !lambda 'return std::to_string(id(pression_filtre).state);'
+
+# ============================================================
+# INTERVAL - Test hors gel toutes les 15 minutes
+# ============================================================
+interval:
+  - interval: 900s
+    then:
+      - script.execute: _fonction_hors_gel
+
+# ============================================================
+# SCRIPT
+# ============================================================
+script:
+  # -------------------------------------------------------
+  # Logique hors gel
+  # Les 3 blocs if sont indépendants: seul le cas applicable
+  # s'exécute (g_flag_hg == false empêche les doublons)
+  # -------------------------------------------------------
+  - id: _fonction_hors_gel
+    then:
+      # Cas 1: T > Seuil1 -> pas de risque
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(_Mode_Fonctionnement_hg).current_option() == "Activé";'
+              - lambda: 'return id(bme280_temperature).state > id(s1_temp_hg).state;'
+          then:
+            - lambda: 'id(g_flag_hg) = false;'
+            - logger.log:
+                format: "HORS-GEL: T=%.1f°C > S1=%.1f°C -> OK"
+                args: [ 'id(bme280_temperature).state', 'id(s1_temp_hg).state' ]
+                level: DEBUG
+
+      # Cas 2: Seuil2 < T < Seuil1 -> risque léger -> pompe 15 min
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(_Mode_Fonctionnement_hg).current_option() == "Activé";'
+              - lambda: 'return id(bme280_temperature).state < id(s1_temp_hg).state;'
+              - lambda: 'return id(bme280_temperature).state > id(s2_temp_hg).state;'
+              - lambda: 'return id(g_flag_hg) == false;'
+          then:
+            - lambda: 'id(g_flag_hg) = true;'
+            - logger.log:
+                format: "HORS-GEL: SEUIL1 - T=%.1f°C -> Pompe ON 15 min"
+                args: [ 'id(bme280_temperature).state' ]
+                level: WARN
+            - homeassistant.event:
+                event: esphome.piscine_alarme
+                data:
+                  type: hors_gel_seuil1_debut
+                  temp: !lambda 'return std::to_string(id(bme280_temperature).state);'
+            - delay: 900s
+            - lambda: 'id(g_flag_hg) = false;'
+            - logger.log:
+                format: "HORS-GEL: SEUIL1 - Fin 15 min. T=%.1f°C"
+                args: [ 'id(bme280_temperature).state' ]
+                level: INFO
+            - homeassistant.event:
+                event: esphome.piscine_alarme
+                data:
+                  type: hors_gel_seuil1_fin
+                  temp: !lambda 'return std::to_string(id(bme280_temperature).state);'
+
+      # Cas 3: T < Seuil2 -> risque sévère -> pompe 30 min
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(_Mode_Fonctionnement_hg).current_option() == "Activé";'
+              - lambda: 'return id(bme280_temperature).state < id(s1_temp_hg).state;'
+              - lambda: 'return id(bme280_temperature).state < id(s2_temp_hg).state;'
+              - lambda: 'return id(g_flag_hg) == false;'
+          then:
+            - lambda: 'id(g_flag_hg) = true;'
+            - logger.log:
+                format: "HORS-GEL: SEUIL2 - T=%.1f°C -> Pompe ON 30 min (GEL SEVERE)"
+                args: [ 'id(bme280_temperature).state' ]
+                level: ERROR
+            - homeassistant.event:
+                event: esphome.piscine_alarme
+                data:
+                  type: hors_gel_seuil2_debut
+                  temp: !lambda 'return std::to_string(id(bme280_temperature).state);'
+            - delay: 1800s
+            - lambda: 'id(g_flag_hg) = false;'
+            - logger.log:
+                format: "HORS-GEL: SEUIL2 - Fin 30 min. T=%.1f°C"
+                args: [ 'id(bme280_temperature).state' ]
+                level: INFO
+            - homeassistant.event:
+                event: esphome.piscine_alarme
+                data:
+                  type: hors_gel_seuil2_fin
+                  temp: !lambda 'return std::to_string(id(bme280_temperature).state);'

@@ -19,7 +19,7 @@ globals:
 
 select:
   - platform: template
-    name: "Mode_Hors_Gel"
+    name: "Mode Hors Gel"
     id: _Mode_Fonctionnement_hg
     optimistic: true
     restore_value: true
@@ -35,7 +35,7 @@ select:
 
 number:
   - platform: template
-    name: "Seuil1_Temp_HG"
+    name: "Seuil Gel Léger"
     id: s1_temp_hg
     optimistic: true
     restore_value: true
@@ -48,7 +48,7 @@ number:
     initial_value: 1.0
 
   - platform: template
-    name: "Seuil2_Temp_HG"
+    name: "Seuil Gel Sévère"
     id: s2_temp_hg
     optimistic: true
     restore_value: true
@@ -63,7 +63,7 @@ number:
 binary_sensor:
   # Alarme pression filtre
   - platform: analog_threshold
-    name: "Etat_pression_Filtre"
+    name: "Alarme Pression Filtre"
     id: _etat_pression_filtre
     sensor_id: pression_filtre
     threshold: ${pression_max}

@@ -1,84 +1,80 @@
-# ============================================================
-# pack_181/filtration.yaml
-# Gestion des modes de filtration (Palier, Classique, Abaque, Horaire, Ma_f, At_f)
+# packages/piscine_181/filtration.yaml
+# Modes de filtration : Palier | Classique | Abaque | Horaire | Ma_f | At_f
 #
-# Principe:
-#   - Toutes les 5s: _fonctionnement_filtration recalcule la durée
-#     selon le mode sélectionné et la T° eau mémorisée
-#   - _calcul_hdebut_hfin: calcule h_debut et h_fin autour de heure_pivot
-#   - _calcul_ma_at_ppe_filtration: compare l'heure courante à h_debut/h_fin
-#     et commande le switch cde_ppe_filtration
-#   - _memorisation_temperature_eau: ne mémorise la T° eau que si
-#     la pompe tourne ET que la tempo de recirculation est écoulée
+# Logique toutes les 5s (_fonctionnement_filtration) :
+#   P1 ent_at_force ON   -> Pompe OFF
+#   P2 g_flag_hg ON      -> Pompe ON  (hors_gel.yaml)
+#   P3 At_f              -> Pompe OFF
+#   P4 Ma_f              -> Pompe ON
+#   P5 Palier/Classique/Abaque -> calcul durée + condition solaire + heure pivot
+#   P6 Horaire           -> plage fixe (debut_mode_horaire + duree_mode_horaire)
 #
-# Dépendances:
-#   - sensor id: temp_piscine              (capteurs.yaml)
-#   - switch id: cde_ppe_filtration        (pompe.yaml)
-#   - switch id: ent_at_force              (pompe.yaml)
-#   - global id: g_flag_hg                 (hors_gel.yaml)
-#   - global id: flag_tempo_ppe_filtre     (ici + script_demarrer_pompe dans pompe.yaml)
-#   - text_sensor id: aff_heure_filtration (capteurs.yaml)
-#   - time id: ha_time                     (fichier principal)
-# ============================================================
+# Condition solaire (modes Classique et Abaque uniquement) :
+#   Si seuil_solaire > 0 ET production_solaire < seuil -> Pompe OFF
+#   seuil_solaire = 0 désactive la condition (mode dégradé)
+#
+# Dépendances :
+#   sensor     : temp_piscine, production_solaire  (capteurs.yaml)
+#   switch     : cde_ppe_filtration, ent_at_force  (pompe.yaml)
+#   global     : g_flag_hg                         (hors_gel.yaml)
+#   global     : flag_tempo_ppe_filtre              (pompe.yaml)
+#   text_sensor: aff_heure_filtration              (capteurs.yaml)
+#   time       : ha_time                           (piscine-181.yaml)
 
 globals:
-  # T° eau mémorisée au démarrage (valide après tempo recirculation)
   - id: g_memoire_temp_eau
     type: float
     restore_value: yes
     initial_value: '25'
 
-  # Flag: true = tempo recirculation écoulée, T° eau utilisable
   - id: flag_tempo_ppe_filtre
     type: bool
     restore_value: no
     initial_value: 'false'
 
-  # Durée de filtration calculée (en heures)
-  - id: g_tps_filtration
+  - id: g_tps_filtration   # Durée calculée en heures
     type: float
     restore_value: no
     initial_value: '8'
 
-  # Limites durée filtration (en heures)
   - id: g_temps_max_filtration
     type: float
     initial_value: '23'
+
   - id: g_temps_min_filtration
     type: float
     initial_value: '5'
 
-  # --- Seuils et durées pour le mode Palier ---
-  # Volume piscine ~50m³, pompe 12m³/h => 1 cycle = 4.2h
-  - id: g_temp_palier1   # T < 10°C
+  # Seuils mode Palier (°C) - Vol ~50m³, pompe 12m³/h => 1 cycle = 4.2h
+  - id: g_temp_palier1
     type: float
     initial_value: '10'
-  - id: g_temp_palier2   # T < 15°C
+  - id: g_temp_palier2
     type: float
     initial_value: '15'
-  - id: g_temp_palier3   # T < 20°C
+  - id: g_temp_palier3
     type: float
     initial_value: '20'
-  - id: g_temp_palier4   # T < 25°C
+  - id: g_temp_palier4
     type: float
     initial_value: '25'
-  - id: g_tps_palier1    # 1h
+  - id: g_tps_palier1
     type: float
     initial_value: '1'
-  - id: g_tps_palier2    # 4h
+  - id: g_tps_palier2
     type: float
     initial_value: '4'
-  - id: g_tps_palier3    # 8h
+  - id: g_tps_palier3
     type: float
     initial_value: '8'
-  - id: g_tps_palier4    # 12h
+  - id: g_tps_palier4
     type: float
     initial_value: '12'
-  - id: g_tps_palier5    # 14h (T >= 25°C)
+  - id: g_tps_palier5
     type: float
     initial_value: '14'
 
-  # --- Coefficients mode Abaque: f(T) = a*T³ + b*T² + c*T + d ---
+  # Coefficients mode Abaque : f(T) = a*T³ + b*T² + c*T + d
   - id: g_abaque_a
     type: float
     initial_value: '0.00335'
@@ -92,7 +88,7 @@ globals:
     type: float
     initial_value: '-10.72859'
 
-  # Variables intermédiaires pour les calculs d'heures
+  # Variables intermédiaires partagées entre scripts
   - id: g_hh
     type: int
     initial_value: '0'
@@ -103,22 +99,13 @@ globals:
     type: int
     initial_value: '0'
 
-# ============================================================
-# SELECT - Choix du mode de fonctionnement
-# ============================================================
 select:
   - platform: template
     name: "Mode_Fonctionnement_filtration"
     id: _Mode_Fonctionnement_filtration
     optimistic: true
     restore_value: true
-    options:
-      - Palier    # Durée par tranches de T° eau
-      - Classique # Durée = T°/2, borné entre 5h et 23h
-      - Abaque    # Durée = polynôme cubique f(T°)
-      - Horaire   # Plage fixe (h_debut + duree_mode_horaire)
-      - Ma_f      # Marche forcée continue
-      - At_f      # Arrêt forcé
+    options: [Palier, Classique, Abaque, Horaire, Ma_f, At_f]
     on_value:
       then:
         - script.execute: _fonctionnement_filtration
@@ -127,11 +114,7 @@ select:
             args: [ 'id(_Mode_Fonctionnement_filtration).current_option()' ]
             level: INFO
 
-# ============================================================
-# DATETIME - Plages horaires
-# ============================================================
 datetime:
-  # Heure pivot: centre de la plage de filtration
   - platform: template
     id: heure_pivot
     type: time
@@ -140,7 +123,6 @@ datetime:
     initial_value: "13:30:00"
     restore_value: true
 
-  # Heure de début calculée (lecture seule dans HA)
   - platform: template
     id: h_debut
     type: time
@@ -149,7 +131,6 @@ datetime:
     initial_value: "00:00:00"
     restore_value: false
 
-  # Heure de fin calculée (lecture seule dans HA)
   - platform: template
     id: h_fin
     type: time
@@ -158,7 +139,6 @@ datetime:
     initial_value: "00:00:00"
     restore_value: false
 
-  # Durée de filtration calculée (lecture seule)
   - platform: template
     id: duree_filtration_calc
     type: time
@@ -167,7 +147,6 @@ datetime:
     initial_value: "00:00:00"
     restore_value: false
 
-  # Mode Horaire: heure de début configurable
   - platform: template
     id: debut_mode_horaire
     type: time
@@ -176,7 +155,6 @@ datetime:
     initial_value: "08:00:00"
     restore_value: true
 
-  # Mode Horaire: durée configurable
   - platform: template
     id: duree_mode_horaire
     type: time
@@ -185,11 +163,7 @@ datetime:
     initial_value: "08:00:00"
     restore_value: true
 
-# ============================================================
-# NUMBER - Paramètres de filtration
-# ============================================================
 number:
-  # Temps de recirculation avant validation de la T° eau
   - platform: template
     name: tempo_recirculation
     id: tempo_mesure_temp
@@ -203,7 +177,6 @@ number:
     icon: mdi:clock
     initial_value: 120
 
-  # Coefficient multiplicateur de la durée calculée (%)
   - platform: template
     name: coeff_Filtration
     id: coeff_filtration
@@ -217,7 +190,6 @@ number:
     icon: mdi:percent
     initial_value: 100
 
-  # Durée de l'arrêt journalier (bouton BP_arret_jour)
   - platform: template
     name: "Durée-Arret_jour"
     id: duree_at_jour
@@ -230,9 +202,7 @@ number:
     step: 0.5
     initial_value: 4
 
-  # Seuil de production solaire pour autoriser le démarrage pompe
-  # Utilisé uniquement en modes Classique et Abaque
-  # 0 W = désactivé (la pompe démarre sans condition solaire)
+  # Seuil solaire pour modes Classique/Abaque (0 = désactivé)
   - platform: template
     name: "Seuil solaire filtration"
     id: seuil_solaire
@@ -246,11 +216,7 @@ number:
     icon: mdi:solar-power
     initial_value: 1000
 
-# ============================================================
-# BUTTON
-# ============================================================
 button:
-  # Stoppe la filtration pour la durée de duree_at_jour
   - platform: template
     name: BP_arret_jour
     id: _arret_jour
@@ -260,105 +226,89 @@ button:
             id: ent_at_force
             state: ON
         - logger.log:
-            format: "FILTRATION: Arret jour DEBUT (%.1f h)"
+            format: "FILTRATION: Arret jour %.1f h"
             args: [ 'id(duree_at_jour).state' ]
             level: INFO
-        - delay: !lambda "return id(duree_at_jour).state * 3600 * 1000;"
+        - delay: !lambda "return id(duree_at_jour).state * 3600000;"
         - switch.template.publish:
             id: ent_at_force
             state: OFF
         - logger.log:
-            format: "FILTRATION: Arret jour FIN"
+            format: "FILTRATION: Fin arret jour"
             level: INFO
 
-# ============================================================
-# INTERVAL
-# ============================================================
 interval:
   - interval: 5s
     then:
       - script.execute: _fonctionnement_filtration
       - script.execute: _memorisation_temperature_eau
 
-# ============================================================
-# SCRIPTS
-# ============================================================
 script:
-  # -------------------------------------------------------
-  # Mémorisation T° eau
-  # -------------------------------------------------------
+  # Mémorise T° eau seulement après la tempo de recirculation
   - id: _memorisation_temperature_eau
     then:
       - if:
           condition:
-            lambda: 'return id(flag_tempo_ppe_filtre) == true;'
+            lambda: 'return id(flag_tempo_ppe_filtre) && !isnan(id(temp_piscine).state);'
           then:
-            - lambda: |-
-                if (!isnan(id(temp_piscine).state)) {
-                  id(g_memoire_temp_eau) = id(temp_piscine).state;
-                }
+            - lambda: 'id(g_memoire_temp_eau) = id(temp_piscine).state;'
       - logger.log:
           format: "TEMP: Flag=%i / Dallas=%.2f°C / Memo=%.2f°C"
           args: [ 'id(flag_tempo_ppe_filtre)', 'id(temp_piscine).state', 'id(g_memoire_temp_eau)' ]
           level: DEBUG
 
-  # -------------------------------------------------------
-  # Calcul durée filtration + commande pompe
-  # -------------------------------------------------------
+  # Calcul durée + décision pompe selon le mode actif
   - id: _fonctionnement_filtration
     then:
-      # P1: Arrêt forcé manuel
+      # P1 - Arrêt forcé manuel
       - if:
           condition:
-            lambda: 'return id(ent_at_force).state == true;'
+            lambda: 'return id(ent_at_force).state;'
           then:
             - switch.turn_off: cde_ppe_filtration
 
-      # P2: Mode hors gel (hors_gel.yaml)
+      # P2 - Hors gel (hors_gel.yaml)
       - if:
           condition:
-            lambda: 'return id(g_flag_hg) == true;'
+            lambda: 'return id(g_flag_hg);'
           then:
             - switch.turn_on: cde_ppe_filtration
             - lambda: 'id(aff_heure_filtration).publish_state("Hors-Gel");'
-            - logger.log:
-                format: "FILTRATION: Hors-Gel -> Pompe ON"
-                level: INFO
 
-      # P3: Mode At_f
+      # P3 - At_f
       - if:
           condition:
-            - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "At_f";'
-            - lambda: 'return id(ent_at_force).state == false;'
-            - lambda: 'return id(g_flag_hg) == false;'
+            and:
+              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "At_f";'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
           then:
             - switch.turn_off: cde_ppe_filtration
             - lambda: 'id(aff_heure_filtration).publish_state("At_force");'
 
-      # P4: Mode Ma_f
+      # P4 - Ma_f
       - if:
           condition:
-            - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Ma_f";'
-            - lambda: 'return id(ent_at_force).state == false;'
-            - lambda: 'return id(g_flag_hg) == false;'
+            and:
+              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Ma_f";'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
           then:
             - switch.turn_on: cde_ppe_filtration
             - lambda: 'id(aff_heure_filtration).publish_state("Ma_force");'
 
-      # P5: Mode Palier
+      # P5 - Palier
       - if:
           condition:
-            - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Palier";'
-            - lambda: 'return id(ent_at_force).state == false;'
-            - lambda: 'return id(g_flag_hg) == false;'
+            and:
+              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Palier";'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
           then:
             - lambda: |-
                 float t = id(g_memoire_temp_eau);
-                if      (t < id(g_temp_palier1))  id(g_tps_filtration) = id(g_tps_palier1);
-                else if (t < id(g_temp_palier2))  id(g_tps_filtration) = id(g_tps_palier2);
-                else if (t < id(g_temp_palier3))  id(g_tps_filtration) = id(g_tps_palier3);
-                else if (t < id(g_temp_palier4))  id(g_tps_filtration) = id(g_tps_palier4);
-                else                              id(g_tps_filtration) = id(g_tps_palier5);
+                if      (t < id(g_temp_palier1)) id(g_tps_filtration) = id(g_tps_palier1);
+                else if (t < id(g_temp_palier2)) id(g_tps_filtration) = id(g_tps_palier2);
+                else if (t < id(g_temp_palier3)) id(g_tps_filtration) = id(g_tps_palier3);
+                else if (t < id(g_temp_palier4)) id(g_tps_filtration) = id(g_tps_palier4);
+                else                             id(g_tps_filtration) = id(g_tps_palier5);
                 id(g_tps_filtration) *= id(coeff_filtration).state / 100.0;
             - logger.log:
                 format: "FILTRATION Palier: T=%.1f°C -> %.2fh"
@@ -366,28 +316,24 @@ script:
                 level: INFO
             - script.execute: _calcul_hdebut_hfin
 
-      # P5: Mode Classique
+      # P5 - Classique (T/2) + condition solaire
       - if:
           condition:
-            - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Classique";'
-            - lambda: 'return id(ent_at_force).state == false;'
-            - lambda: 'return id(g_flag_hg) == false;'
+            and:
+              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Classique";'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
           then:
             - lambda: |-
                 id(g_tps_filtration) = id(g_memoire_temp_eau) / 2.0;
-                id(g_tps_filtration) = min(id(g_temps_max_filtration), id(g_tps_filtration));
-                id(g_tps_filtration) = max(id(g_temps_min_filtration), id(g_tps_filtration));
+                id(g_tps_filtration) = min(id(g_temps_max_filtration), max(id(g_temps_min_filtration), id(g_tps_filtration)));
                 id(g_tps_filtration) *= id(coeff_filtration).state / 100.0;
             - logger.log:
                 format: "FILTRATION Classique: T=%.1f°C -> %.2fh"
                 args: [ 'id(g_memoire_temp_eau)', 'id(g_tps_filtration)' ]
                 level: INFO
-            # Condition solaire: si seuil > 0 et production insuffisante -> pas de filtration
             - if:
                 condition:
-                  lambda: |-
-                    return id(seuil_solaire).state > 0
-                        && id(production_solaire).state < id(seuil_solaire).state;
+                  lambda: 'return id(seuil_solaire).state > 0 && id(production_solaire).state < id(seuil_solaire).state;'
                 then:
                   - switch.turn_off: cde_ppe_filtration
                   - logger.log:
@@ -397,30 +343,26 @@ script:
                 else:
                   - script.execute: _calcul_hdebut_hfin
 
-      # P5: Mode Abaque
+      # P5 - Abaque (polynôme cubique) + condition solaire
       - if:
           condition:
-            - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Abaque";'
-            - lambda: 'return id(ent_at_force).state == false;'
-            - lambda: 'return id(g_flag_hg) == false;'
+            and:
+              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Abaque";'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
           then:
             - lambda: |-
                 float t = id(g_memoire_temp_eau);
                 id(g_tps_filtration) = id(g_abaque_a)*pow(t,3) + id(g_abaque_b)*pow(t,2)
                                      + id(g_abaque_c)*t + id(g_abaque_d);
                 id(g_tps_filtration) *= id(coeff_filtration).state / 100.0;
-                id(g_tps_filtration) = min(id(g_temps_max_filtration), id(g_tps_filtration));
-                id(g_tps_filtration) = max(id(g_temps_min_filtration), id(g_tps_filtration));
+                id(g_tps_filtration) = min(id(g_temps_max_filtration), max(id(g_temps_min_filtration), id(g_tps_filtration)));
             - logger.log:
                 format: "FILTRATION Abaque: T=%.1f°C -> %.2fh"
                 args: [ 'id(g_memoire_temp_eau)', 'id(g_tps_filtration)' ]
                 level: INFO
-            # Condition solaire: si seuil > 0 et production insuffisante -> pas de filtration
             - if:
                 condition:
-                  lambda: |-
-                    return id(seuil_solaire).state > 0
-                        && id(production_solaire).state < id(seuil_solaire).state;
+                  lambda: 'return id(seuil_solaire).state > 0 && id(production_solaire).state < id(seuil_solaire).state;'
                 then:
                   - switch.turn_off: cde_ppe_filtration
                   - logger.log:
@@ -430,103 +372,84 @@ script:
                 else:
                   - script.execute: _calcul_hdebut_hfin
 
-      # P6: Mode Horaire
+      # P6 - Horaire (plage fixe)
       - if:
           condition:
-            - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Horaire";'
-            - lambda: 'return id(ent_at_force).state == false;'
-            - lambda: 'return id(g_flag_hg) == false;'
+            and:
+              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Horaire";'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
           then:
             - datetime.time.set:
                 id: h_debut
                 time: !lambda |-
-                  return {second: 0,
-                          minute: id(debut_mode_horaire).minute,
-                          hour:   id(debut_mode_horaire).hour};
+                  return {second: 0, minute: id(debut_mode_horaire).minute,
+                          hour: id(debut_mode_horaire).hour};
             - datetime.time.set:
                 id: h_fin
                 time: !lambda |-
                   int total = id(h_debut).hour * 60 + id(h_debut).minute
                             + id(duree_mode_horaire).hour * 60 + id(duree_mode_horaire).minute;
-                  return {second: 0,
-                          minute: static_cast<uint8_t>(total % 60),
-                          hour:   static_cast<uint8_t>((total / 60) % 24)};
+                  return {second: 0, minute: static_cast<uint8_t>(total % 60),
+                          hour: static_cast<uint8_t>((total / 60) % 24)};
             - lambda: |-
                 char buf[24];
                 snprintf(buf, sizeof(buf), "%02u:%02u -> %02u:%02u",
                   id(h_debut).hour, id(h_debut).minute,
                   id(h_fin).hour,   id(h_fin).minute);
                 id(aff_heure_filtration).publish_state(buf);
-            - logger.log:
-                format: "FILTRATION Horaire: %02u:%02u -> %02u:%02u"
-                args: [ 'id(h_debut).hour', 'id(h_debut).minute',
-                        'id(h_fin).hour',   'id(h_fin).minute' ]
-                level: INFO
             - script.execute: _calcul_ma_at_ppe_filtration
 
-  # -------------------------------------------------------
-  # Calcul h_debut / h_fin centrés sur heure_pivot
-  # -------------------------------------------------------
+  # Calcule h_debut et h_fin centrés sur heure_pivot
   - id: _calcul_hdebut_hfin
     mode: single
     then:
       - datetime.time.set:
           id: heure_pivot
           time: !lambda |-
-            return {second: 0,
-                    minute: id(heure_pivot).minute,
-                    hour:   id(heure_pivot).hour};
+            return {second: 0, minute: id(heure_pivot).minute, hour: id(heure_pivot).hour};
       - lambda: |-
-          double pivot = id(heure_pivot).hour * 60.0 + id(heure_pivot).minute;
-          double debut = pivot - (id(g_tps_filtration) / 2.0 * 60.0);
-          if (debut < 0) debut += 24 * 60;
-          id(g_hh) = (int)(debut / 60) % 24;
-          id(g_mm) = (int)debut % 60;
+          double p = id(heure_pivot).hour * 60.0 + id(heure_pivot).minute;
+          double d = p - id(g_tps_filtration) * 30.0;  // /2*60 = *30
+          if (d < 0) d += 1440;
+          id(g_hh) = (int)(d / 60) % 24;
+          id(g_mm) = (int)d % 60;
       - datetime.time.set:
           id: h_debut
           time: !lambda |-
-            return {second: 0,
-                    minute: static_cast<uint8_t>(id(g_mm)),
-                    hour:   static_cast<uint8_t>(id(g_hh))};
+            return {second: 0, minute: static_cast<uint8_t>(id(g_mm)),
+                    hour: static_cast<uint8_t>(id(g_hh))};
       - lambda: |-
-          double pivot = id(heure_pivot).hour * 60.0 + id(heure_pivot).minute;
-          double fin   = pivot + (id(g_tps_filtration) / 2.0 * 60.0);
-          id(g_hh) = (int)(fin / 60) % 24;
-          id(g_mm) = (int)fin % 60;
+          double p = id(heure_pivot).hour * 60.0 + id(heure_pivot).minute;
+          double f = p + id(g_tps_filtration) * 30.0;
+          id(g_hh) = (int)(f / 60) % 24;
+          id(g_mm) = (int)f % 60;
       - datetime.time.set:
           id: h_fin
           time: !lambda |-
-            return {second: 0,
-                    minute: static_cast<uint8_t>(id(g_mm)),
-                    hour:   static_cast<uint8_t>(id(g_hh))};
-      - lambda: |-
-          CONVERT_SECONDS(id(g_tps_filtration) * 3600, id(g_hh), id(g_mm), id(g_ss));
+            return {second: 0, minute: static_cast<uint8_t>(id(g_mm)),
+                    hour: static_cast<uint8_t>(id(g_hh))};
+      - lambda: 'CONVERT_SECONDS(id(g_tps_filtration) * 3600, id(g_hh), id(g_mm), id(g_ss));'
       - datetime.time.set:
           id: duree_filtration_calc
           time: !lambda |-
-            return {second: 0,
-                    minute: static_cast<uint8_t>(id(g_mm)),
-                    hour:   static_cast<uint8_t>(id(g_hh))};
+            return {second: 0, minute: static_cast<uint8_t>(id(g_mm)),
+                    hour: static_cast<uint8_t>(id(g_hh))};
       - lambda: |-
           char buf[32];
           snprintf(buf, sizeof(buf), "%02u:%02u / %02u:%02u / %02u:%02u",
-            id(h_debut).hour,    id(h_debut).minute,
+            id(h_debut).hour, id(h_debut).minute,
             id(heure_pivot).hour, id(heure_pivot).minute,
-            id(h_fin).hour,      id(h_fin).minute);
+            id(h_fin).hour, id(h_fin).minute);
           id(aff_heure_filtration).publish_state(buf);
       - logger.log:
-          format: "FILTRATION: %02u:%02u -> [%02u:%02u] -> %02u:%02u (%.2fh)"
-          args: [ 'id(h_debut).hour',    'id(h_debut).minute',
+          format: "FILTRATION: %02u:%02u -[%02u:%02u]- %02u:%02u (%.2fh)"
+          args: [ 'id(h_debut).hour', 'id(h_debut).minute',
                   'id(heure_pivot).hour', 'id(heure_pivot).minute',
-                  'id(h_fin).hour',      'id(h_fin).minute',
-                  'id(g_tps_filtration)' ]
+                  'id(h_fin).hour', 'id(h_fin).minute', 'id(g_tps_filtration)' ]
           level: INFO
       - script.execute: _calcul_ma_at_ppe_filtration
 
-  # -------------------------------------------------------
-  # Décision marche/arrêt pompe selon fenêtre horaire
-  # Gère le passage minuit
-  # -------------------------------------------------------
+  # Compare l'heure courante à la fenêtre h_debut/h_fin -> commande pompe
   - id: _calcul_ma_at_ppe_filtration
     mode: single
     then:
@@ -535,7 +458,7 @@ script:
             time.has_time:
           else:
             - logger.log:
-                format: "FILTRATION: Heure non synchronisée"
+                format: "FILTRATION: heure non sync, pompe inchangée"
                 level: WARN
       - if:
           condition:
@@ -543,18 +466,10 @@ script:
             - lambda: |-
                 int now   = id(ha_time).now().hour * 60 + id(ha_time).now().minute;
                 int debut = id(h_debut).hour * 60 + id(h_debut).minute;
-                int fin   = id(h_fin).hour * 60 + id(h_fin).minute;
-                if (fin >= debut)
-                  return (now >= debut && now < fin);
-                else
-                  return (now >= debut || now < fin);
+                int fin   = id(h_fin).hour   * 60 + id(h_fin).minute;
+                return (fin >= debut) ? (now >= debut && now < fin)
+                                      : (now >= debut || now < fin);
           then:
             - switch.turn_on: cde_ppe_filtration
-            - logger.log:
-                format: "FILTRATION: Plage active -> Pompe ON"
-                level: DEBUG
           else:
             - switch.turn_off: cde_ppe_filtration
-            - logger.log:
-                format: "FILTRATION: Hors plage -> Pompe OFF"
-                level: DEBUG

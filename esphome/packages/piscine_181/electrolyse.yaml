@@ -1,0 +1,120 @@
+# packages/piscine_181/electrolyse.yaml
+# Protection et contrôle de l'électrolyseur à sel
+#
+# Règles d'activation (toutes doivent être vraies) :
+#   1. Pompe en fonctionnement (pool_pump_relay ON)
+#   2. Tempo de recirculation écoulée (flag_tempo_ppe_filtre = true)
+#   3. T° eau >= seuil_temperature_electrolyse (défaut 18°C)
+#
+# Protection anti-marche prolongée :
+#   Le compteur electrolyse_running_time est incrémenté de 5 min
+#   toutes les 5 min via time.on_time dans piscine-181.yaml.
+#   Au dépassement du seuil : pause 120s puis redémarrage.
+#
+# Dépendances :
+#   switch  id: electrolyse_relay     (pompe.yaml)
+#   global  id: flag_tempo_ppe_filtre (filtration.yaml)
+#   global  id: g_memoire_temp_eau    (filtration.yaml)
+#   sensor  id: temp_piscine          (capteurs.yaml)
+
+globals:
+  - id: electrolyse_running_time
+    type: int
+    initial_value: '0'
+    restore_value: true
+
+number:
+  # Durée max de fonctionnement continu avant pause forcée (minutes)
+  - platform: template
+    name: "Durée Max Électrolyseur"
+    id: electrolyse_running_threshold
+    icon: mdi:timer-pause
+    initial_value: 135
+    min_value: 60
+    max_value: 280
+    step: 5
+    mode: slider
+    optimistic: true
+
+  # Seuil de T° eau en dessous duquel l'électrolyseur reste éteint
+  # En hiver ou eau froide, l'électrolyse est inefficace et abîme la cellule
+  - platform: template
+    name: "Seuil Température Électrolyseur"
+    id: seuil_temperature_electrolyse
+    icon: mdi:thermometer-water
+    initial_value: 18
+    min_value: 10
+    max_value: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    device_class: temperature
+    mode: box
+    optimistic: true
+    restore_value: true
+
+script:
+  # ── Contrôle électrolyseur selon conditions (appelé après tempo) ──────────
+  # Conditions : pompe ON + tempo écoulée + T° >= seuil
+  # Appelé par script_demarrer_pompe après la tempo de recirculation
+  # ET par l'interval toutes les 60s pour un contrôle continu
+  - id: script_controle_electrolyse
+    mode: single
+    then:
+      - if:
+          condition:
+            and:
+              # Pompe physiquement en marche
+              - lambda: 'return id(pool_pump_relay).state;'
+              # Tempo de recirculation écoulée (T° eau valide)
+              - lambda: 'return id(flag_tempo_ppe_filtre);'
+              # T° eau au-dessus du seuil d'activation
+              - lambda: 'return id(g_memoire_temp_eau) >= id(seuil_temperature_electrolyse).state;'
+          then:
+            - if:
+                condition:
+                  lambda: 'return !id(electrolyse_relay).state;'
+                then:
+                  - switch.turn_on: electrolyse_relay
+                  - logger.log:
+                      format: "ELECTROLYSE: ON — Pompe active, T°=%.1f°C >= seuil=%.1f°C"
+                      args: [ 'id(g_memoire_temp_eau)', 'id(seuil_temperature_electrolyse).state' ]
+                      level: INFO
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(electrolyse_relay).state;'
+                then:
+                  - switch.turn_off: electrolyse_relay
+                  - logger.log:
+                      format: "ELECTROLYSE: OFF — Pompe=%i Tempo=%i T°=%.1f°C Seuil=%.1f°C"
+                      args: [ 'id(pool_pump_relay).state', 'id(flag_tempo_ppe_filtre)',
+                              'id(g_memoire_temp_eau)', 'id(seuil_temperature_electrolyse).state' ]
+                      level: INFO
+
+  # ── Pause 120s puis redémarrage (protection marche prolongée) ─────────────
+  - id: script_pause_electrolyse
+    mode: restart
+    then:
+      - switch.turn_off: electrolyse_relay
+      - logger.log: "ELECTROLYSE: Pause 120s (seuil durée atteint)"
+      - delay: 120s
+      # Redémarre seulement si les conditions sont toujours remplies
+      - script.execute: script_controle_electrolyse
+      - logger.log: "ELECTROLYSE: Reprise après pause"
+
+  # ── Reset du compteur de fonctionnement ───────────────────────────────────
+  - id: script_init_electrolyseur
+    then:
+      - globals.set:
+          id: electrolyse_running_time
+          value: '0'
+      - logger.log: "ELECTROLYSE: Compteur remis à zéro"
+
+# ── Contrôle continu toutes les 60s ──────────────────────────────────────────
+# Réévalue les conditions pendant toute la durée de filtration :
+#   - si T° remonte au-dessus du seuil  -> allume l'électrolyseur
+#   - si T° repasse sous le seuil       -> l'éteint
+interval:
+  - interval: 60s
+    then:
+      - script.execute: script_controle_electrolyse

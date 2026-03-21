@@ -1,0 +1,32 @@
+# packages/piscine_181/lumiere.yaml
+# Éclairage piscine - Relay 1 (GPIO25)
+# Extinction automatique à 00h05 via script_shutdown (pompe.yaml)
+
+switch:
+  - platform: gpio
+    name: "Lumiere Piscine"
+    pin: GPIO25
+    id: lumiere_piscine
+    restore_mode: ALWAYS_OFF
+    inverted: no
+    icon: mdi:lightbulb-outline
+    internal: true
+    on_turn_on:
+      switch.template.publish:
+        id: cde_eclairage
+        state: true
+    on_turn_off:
+      switch.template.publish:
+        id: cde_eclairage
+        state: false
+
+  - platform: template
+    name: "Éclairage Piscine"
+    id: cde_eclairage
+    icon: mdi:lightbulb-outline
+    optimistic: true
+    lambda: 'return id(lumiere_piscine).state;'
+    turn_on_action:
+      - switch.turn_on: lumiere_piscine
+    turn_off_action:
+      - switch.turn_off: lumiere_piscine

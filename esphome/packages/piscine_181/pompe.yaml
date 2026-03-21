@@ -1,0 +1,125 @@
+# packages/piscine_181/pompe.yaml
+# Relais pompe/pH/électrolyseur + séquences démarrage / extinction
+#
+# Séquence démarrage : PhMetre ON -> Electrolyse ON -> 30s -> Pompe ON
+#                      -> attente tempo_mesure_temp -> T° eau valide
+# Séquence extinction (00h05) : Lumière -> pH -> Electrolyse -> 20s -> Pompe
+
+switch:
+  # Relay 2 - Pompe dosage pH (GPIO26)
+  # ALWAYS_OFF : ne doit jamais tourner sans la pompe de filtration
+  - platform: gpio
+    name: "Pompe Dosage pH"
+    pin: GPIO26
+    id: PhMetre
+    icon: mdi:ph
+    inverted: no
+    restore_mode: ALWAYS_OFF
+
+  # Relay 3 - Électrolyseur (GPIO33)
+  - platform: gpio
+    name: "Électrolyseur Sel"
+    id: electrolyse_relay
+    pin: GPIO33
+    restore_mode: ALWAYS_OFF
+    inverted: no
+    icon: mdi:skull-crossbones-outline
+
+  # Relay 4 - Pompe filtration (GPIO32) - interne, piloté via cde_ppe_filtration
+  - platform: gpio
+    name: "Pool Pump Relay"
+    pin: GPIO32
+    id: pool_pump_relay
+    restore_mode: ALWAYS_OFF
+    inverted: no
+    icon: mdi:pump
+    internal: true
+
+  # Commande logique pompe (optimistic = pas de re-déclenchement pendant la séquence 30s)
+  - platform: template
+    name: "Pompe Filtration"
+    id: cde_ppe_filtration
+    icon: mdi:pump
+    optimistic: true
+    turn_on_action:
+      - script.execute: script_demarrer_pompe
+    turn_off_action:
+      # Si la séquence de démarrage est encore en cours (délai 30s ou tempo
+      # recirculation), on l'interrompt proprement avant de couper les relais
+      - script.stop: script_demarrer_pompe
+      - script.stop: script_controle_electrolyse
+      - lambda: 'id(flag_tempo_ppe_filtre) = false;'
+      # Électrolyseur et pH-mètre s'éteignent immédiatement : sans pompe, jamais actifs
+      - switch.turn_off: electrolyse_relay
+      - switch.turn_off: PhMetre
+      - logger.log: "POMPE: Arrêt -> électrolyseur et pH-mètre éteints"
+      - delay: 5s
+      - switch.turn_off: pool_pump_relay
+
+  # Arrêt forcé de la filtration (priorité P1 dans filtration.yaml)
+  - platform: template
+    name: "Arrêt Forcé Filtration"
+    id: ent_at_force
+    optimistic: true
+    on_turn_on:
+      then:
+        - switch.turn_off: cde_ppe_filtration
+        - script.execute: _fonctionnement_filtration
+        - lambda: 'id(aff_heure_filtration).publish_state("At_force_manuel");'
+        - datetime.time.set:
+            id: duree_filtration_calc
+            time: !lambda "return {second: 0, minute: 0, hour: 0};"
+        - logger.log:
+            format: "POMPE: Arret force ACTIVE"
+            level: INFO
+    on_turn_off:
+      then:
+        - logger.log:
+            format: "POMPE: Arret force DESACTIVE"
+            level: INFO
+        - script.execute: _fonctionnement_filtration
+
+  - platform: restart
+    name: "Redémarrage ESP"
+
+script:
+  # Séquence de démarrage - mode single : pas de cumul d'appels
+  # 1. PhMetre ON immédiatement
+  # 2. Pompe ON après 30s
+  # 3. flag_tempo = false (T° non valide pendant la recirculation)
+  # 4. Attente tempo_recirculation
+  # 5. flag_tempo = true -> T° valide
+  # 6. script_controle_electrolyse décide si l'électrolyseur peut démarrer
+  #    (condition : pompe ON + tempo OK + T° >= seuil)
+  - id: script_demarrer_pompe
+    mode: single
+    then:
+      - logger.log: "POMPE: Démarrage (PhMetre -> 30s -> Pompe -> tempo -> contrôle électrolyse)"
+      - switch.turn_on: PhMetre
+      - script.execute: script_init_electrolyseur
+      - delay: 30s
+      - switch.turn_on: pool_pump_relay
+      # T° eau non encore valide : électrolyseur interdit
+      - lambda: 'id(flag_tempo_ppe_filtre) = false;'
+      - logger.log: "POMPE: Recirculation en cours, électrolyseur en attente..."
+      - delay: !lambda "return id(tempo_mesure_temp).state * 1000;"
+      # T° eau validée : on laisse script_controle_electrolyse décider
+      - lambda: 'id(flag_tempo_ppe_filtre) = true;'
+      - logger.log: "POMPE: Tempo recirculation écoulée, évaluation électrolyseur"
+      - script.execute: script_controle_electrolyse
+
+  # Extinction nocturne (00h05) - mode restart : ré-entrant si besoin
+  - id: script_shutdown
+    mode: restart
+    then:
+      - logger.log: "SHUTDOWN: Extinction 00h05"
+      - switch.turn_off: lumiere_piscine
+      - delay: 2s
+      - switch.turn_off: PhMetre
+      - switch.turn_off: electrolyse_relay
+      - script.execute: script_init_electrolyseur
+      - delay: 20s
+      - switch.turn_off: pool_pump_relay
+      - switch.template.publish:
+          id: cde_ppe_filtration
+          state: false

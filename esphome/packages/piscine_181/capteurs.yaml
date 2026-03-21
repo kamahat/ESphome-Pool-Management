@@ -1,0 +1,277 @@
+# packages/piscine_181/capteurs.yaml
+# Noms HA générés (préfixe device: piscine_181_) :
+#
+#   binary_sensor.piscine_181_esp_piscine_connecte
+#   binary_sensor.piscine_181_pompe_en_fonctionnement
+#   binary_sensor.piscine_181_alarme_relay_pompe     ← NOUVEAU
+#   sensor.piscine_181_production_solaire
+#   sensor.piscine_181_temperature_exterieure       (BME280 = temp_ext hors gel)
+#   sensor.piscine_181_pression_atmospherique
+#   sensor.piscine_181_humidite_exterieure
+#   sensor.piscine_181_humidite_absolue
+#   sensor.piscine_181_point_de_rosee
+#   sensor.piscine_181_tdeg_piscine                 (° -> deg dans ESPHome)
+#   sensor.piscine_181_capteur_pression_brut        (disabled_by_default)
+#   sensor.piscine_181_pression_filtre
+#   sensor.piscine_181_temps_filtration_journalier
+#   sensor.piscine_181_plage_horaire_filtration
+#   sensor.piscine_181_extinction_automatique
+#   sensor.piscine_181_synchro_horloge_ha
+#
+# IDs internes exportés vers d'autres packages :
+#   production_solaire, bme280_temperature, temp_piscine
+#   pression_filtre, pool_pump_relay, ppe_filt_en_fonctionnement
+#   _temps_fonctionnement_ppe_piscine_jour, aff_heure_filtration
+#   ${friendly_name}_text_sensor_shutdown, ${friendly_name}_text_in_sync
+
+globals:
+  # Timestamp de début de la dernière divergence relais/commande détectée
+  # 0 = pas de divergence en cours
+  - id: g_relay_diverge_since
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+binary_sensor:
+  - platform: status
+    name: "ESP Piscine Connecté"
+
+  # Alimente le compteur duty_time temps_filtration_journalier
+  - platform: template
+    name: "Pompe en Fonctionnement"
+    id: ppe_filt_en_fonctionnement
+    lambda: 'return id(pool_pump_relay).state;'
+
+  # ── Surveillance cohérence commande logique ↔ relais physique ──────────────
+  # True = divergence confirmée (persistante > 15s hors séquence de démarrage)
+  # Cas couverts :
+  #   - Commande ON mais relais physique reste OFF (relais collé/HS)
+  #   - Commande OFF mais relais physique reste ON (relais bloqué fermé = DANGER)
+  # La fenêtre de 15s évite les fausses alarmes pendant la séquence de démarrage
+  # (délai 30s entre PhMetre ON et Pompe ON, tempo recirculation).
+  # entity_category diagnostic = visible dans HA mais sans alarme par défaut
+  - platform: template
+    name: "Alarme Relay Pompe"
+    id: alarme_relay_pompe
+    device_class: problem
+    entity_category: diagnostic
+    lambda: |-
+      bool cmd    = id(cde_ppe_filtration).state;
+      bool relais = id(pool_pump_relay).state;
+      // Pendant la séquence de démarrage (script en cours), la divergence
+      // cmd=ON / relais=OFF est normale -> on ne la considère pas
+      bool sequence_en_cours = id(script_demarrer_pompe).is_running();
+      if (cmd == relais || (cmd && !relais && sequence_en_cours)) {
+        id(g_relay_diverge_since) = 0;
+        return false;
+      }
+      // Première détection : on horodate
+      if (id(g_relay_diverge_since) == 0 && id(ha_time).now().is_valid()) {
+        id(g_relay_diverge_since) = id(ha_time).now().timestamp;
+      }
+      // Alarme confirmée seulement après 15s de divergence persistante
+      if (id(g_relay_diverge_since) == 0) return false;
+      return (id(ha_time).now().timestamp - id(g_relay_diverge_since)) > 15;
+    on_press:
+      then:
+        - logger.log:
+            format: "ALARME: Divergence relay pompe! Commande=%i / Relay=%i"
+            args: [ 'id(cde_ppe_filtration).state', 'id(pool_pump_relay).state' ]
+            level: ERROR
+        - homeassistant.event:
+            event: esphome.piscine_alarme
+            data:
+              type: relay_pompe_divergence
+              commande: !lambda 'return id(cde_ppe_filtration).state ? "ON" : "OFF";'
+              relais:   !lambda 'return id(pool_pump_relay).state   ? "ON" : "OFF";'
+        # Tentative de resynchronisation :
+        # Si commande=ON et relay=OFF -> forcer la mise en marche
+        # Si commande=OFF et relay=ON -> couper le relais d'urgence
+        - if:
+            condition:
+              lambda: 'return id(cde_ppe_filtration).state && !id(pool_pump_relay).state;'
+            then:
+              - logger.log: "RELAY POMPE: Commande=ON Relay=OFF -> tentative de remise en marche"
+              - switch.turn_on: pool_pump_relay
+        - if:
+            condition:
+              lambda: 'return !id(cde_ppe_filtration).state && id(pool_pump_relay).state;'
+            then:
+              - logger.log: "RELAY POMPE: Commande=OFF Relay=ON -> coupure forcée (SECURITE)"
+              - switch.turn_off: pool_pump_relay
+              - switch.turn_off: electrolyse_relay
+              - switch.turn_off: PhMetre
+    on_release:
+      then:
+        - logger.log:
+            format: "RELAY POMPE: Divergence résolue (Commande=%i / Relay=%i)"
+            args: [ 'id(cde_ppe_filtration).state', 'id(pool_pump_relay).state' ]
+            level: INFO
+        - homeassistant.event:
+            event: esphome.piscine_alarme
+            data:
+              type: relay_pompe_ok
+
+sensor:
+  # Production solaire (Envoy) -> condition démarrage modes Classique/Abaque
+  - platform: homeassistant
+    name: "Production Solaire"
+    id: production_solaire
+    entity_id: sensor.envoy_122028037777_current_power_production
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    filters:
+      - filter_out: nan
+
+  # T° eau Blue Connect (ESP-233) -> utilisée comme source de T° quand pompe arrêtée
+  # Horodatage stocké dans g_ble_temp_last_update (timestamp Unix) à chaque réception
+  - platform: homeassistant
+    name: "T° Eau BLE"
+    id: temp_eau_ble
+    entity_id: sensor.piscine_233_mouillezalin_temperature
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    filters:
+      - filter_out: nan
+    on_value:
+      then:
+        - lambda: |-
+            if (id(ha_time).now().is_valid()) {
+              id(g_ble_temp_last_update) = id(ha_time).now().timestamp;
+              ESP_LOGD("temp_ble", "BLE T°=%.1f°C horodaté %d", x, id(g_ble_temp_last_update));
+            }
+
+  # BME280 @ 0x76 - Station météo locale
+  # bme280_temperature = temp_ext pour hors_gel.yaml
+  - platform: bme280_i2c
+    temperature:
+      name: "Température Extérieure"
+      id: bme280_temperature
+      oversampling: 16x
+      filters:
+        - median
+    pressure:
+      name: "Pression Atmosphérique"
+      id: bme280_pressure
+      filters:
+        - median
+    humidity:
+      name: "Humidité Extérieure"
+      id: bme280_humidity
+      filters:
+        - median
+    address: 0x76
+    update_interval: 60s
+
+  - platform: absolute_humidity
+    name: "Humidité Absolue"
+    temperature: bme280_temperature
+    humidity: bme280_humidity
+    filters:
+      - round: 2
+
+  - platform: template
+    name: "Point de Rosée"
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-alert
+    accuracy_decimals: 2
+    filters:
+      - round: 2
+    lambda: |-
+      float H = id(bme280_humidity).state;
+      float T = id(bme280_temperature).state;
+      return 243.5 * (log(H/100.0) + 17.67*T/(243.5+T))
+                   / (17.67 - log(H/100.0) - 17.67*T/(243.5+T));
+
+  # Dallas GPIO13 - T° eau piscine -> g_memoire_temp_eau (filtration.yaml)
+  # "T° Piscine" : ° -> "deg" dans ESPHome -> entity: sensor.piscine_181_tdeg_piscine
+  - platform: dallas_temp
+    name: "T° Piscine"
+    id: temp_piscine
+    address: 0x67041663d082ff28
+    resolution: 10
+    update_interval: 120s
+    icon: mdi:pool-thermometer
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - filter_out: nan
+      - filter_out: 85.0
+      - round: 1
+
+  # ADS1115 ch A2 - Tension brute capteur pression (désactivé par défaut dans HA)
+  - platform: ads1115
+    multiplexer: 'A2_GND'
+    name: "Capteur Pression Brut"
+    id: ${friendly_name}_adc_pression_filtre
+    gain: 4.096
+    resolution: 16 bits
+    update_interval: 30s
+    device_class: voltage
+    state_class: measurement
+    icon: mdi:gauge
+    unit_of_measurement: mV
+    disabled_by_default: true
+    filters:
+      - multiply: 1000
+      - clamp:
+          min_value: 0
+          max_value: 3300
+          ignore_out_of_range: false
+      - round: 0
+
+  # Pression filtre calculée en Bar (id requis par hors_gel.yaml -> analog_threshold)
+  - platform: template
+    id: pression_filtre
+    name: "Pression Filtre"
+    unit_of_measurement: "Bar"
+    accuracy_decimals: 2
+    update_interval: 30s
+    lambda: 'return fabs(id(${friendly_name}_adc_pression_filtre).state);'
+    filters:
+      - calibrate_linear:
+          method: least_squares
+          datapoints:
+            - 0   -> 0.0
+            - 520 -> 0.4
+            - 683 -> 0.6
+            - 876 -> 0.68
+      - exponential_moving_average:
+          alpha: 0.1
+          send_every: 2
+      - round: 2
+
+  # Compteur journalier - reset à 00h00 via piscine-181.yaml
+  - platform: duty_time
+    id: _temps_fonctionnement_ppe_piscine_jour
+    name: "Temps Filtration Journalier"
+    sensor: ppe_filt_en_fonctionnement
+    restore: true
+    unit_of_measurement: "s"
+    filters:
+      - round: 0
+
+text_sensor:
+  # Plage horaire active : "HH:MM / pivot / HH:MM" | "Ma_force" | "Hors-Gel"
+  - platform: template
+    id: aff_heure_filtration
+    name: "Plage Horaire Filtration"
+    icon: mdi:clock-time-four-outline
+
+  - platform: template
+    id: ${friendly_name}_text_sensor_shutdown
+    name: "Extinction Automatique"
+    icon: mdi:power-sleep
+    update_interval: never
+    entity_category: diagnostic
+
+  - platform: template
+    id: ${friendly_name}_text_in_sync
+    name: "Synchro Horloge HA"
+    icon: mdi:timer-sync
+    update_interval: never
+    entity_category: diagnostic

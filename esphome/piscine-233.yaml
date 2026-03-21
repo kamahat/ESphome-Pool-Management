@@ -1,0 +1,357 @@
+substitutions:
+  device_name: piscine-${octet1}
+  friendly_name: piscine-${octet1}
+  description: "BlueRiiot Proxy"
+  device_description: "${description} - ESP32 BLE to WiFi Proxy for Blue Connect Pool Sensor"
+  device_area: "Piscine"
+  board: esp32dev
+  octet1: "233"
+
+  blueriiot_mac: !secret blueriiot_mac
+  blueriiot_name_prefix: !secret blueriiot_nameprefix
+  blueriiot_id_prefix: !secret blueriiot_idprefix
+
+  # Envoi : écrire 0x01 sur cette caractéristique pour déclencher une mesure
+  blueriiot_send_service_uuid: 'F3300001-F0A2-9B06-0C59-1BC4763B5C00'
+  blueriiot_send_characteristic_uuid: 'F3300002-F0A2-9B06-0C59-1BC4763B5C00'
+
+  # Réception des données de mesure via notification
+  blueriiot_recieve_service_uuid: 'F3300001-F0A2-9B06-0C59-1BC4763B5C00'
+  blueriiot_recieve_characteristic_uuid: 'F3300003-F0A2-9B06-0C59-1BC4763B5C00'
+
+# =====================
+# Source : https://community.home-assistant.io/t/blue-connect-pool-measurements/118901/420?page=11
+# =====================
+# Changelog :
+# rev 2025-06-05 - Salinité liée à la température, correction chlore, batterie, uptime
+# rev 2025-06-10 - Optimisation ESPHome : fix formule chlore (priorité opérateurs),
+#                  clamp batterie 0–100 %, suppression device_class invalide ORP,
+#                  casse device_class corrigée, on_value_range pH sans chevauchement
+# rev 2026-03-20 - reconstruction code
+# =====================
+
+esphome:
+  name: ${device_name}
+  area: ${device_area}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: ${board}
+  framework:
+    type: esp-idf
+
+api:
+  encryption:
+    key: !secret api_key_esp-233
+
+ota:
+  - platform: esphome
+    password: !secret ota_esp-233
+
+packages:
+  wifi: !include common/wifi-iot.yaml
+  device_base: !include common/base.yaml
+  network-service: !include common/network-service.yaml
+
+logger:
+  level: INFO
+
+# ====================
+# BLE Tracker
+# ====================
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+    interval: 1100ms
+    window: 1100ms  # égal à l'intervalle = scan continu (pas de gap)
+  on_ble_advertise:
+    - mac_address: ${blueriiot_mac}
+      then:
+        - logger.log:
+            format: "Found Blueriiot sensor"
+            level: DEBUG
+
+ble_client:
+  - mac_address: ${blueriiot_mac}
+    id: ble_client_${blueriiot_id_prefix}
+    on_connect:
+      then:
+        - logger.log:
+            format: "Connected to Blueriiot sensor"
+            level: INFO
+        - lambda: "id(binary_sensor_${blueriiot_id_prefix}_connected).publish_state(true);"
+        - delay: 2s
+        - button.press: button_${blueriiot_id_prefix}_doreading
+    on_disconnect:
+      then:
+        - lambda: "id(binary_sensor_${blueriiot_id_prefix}_connected).publish_state(false);"
+
+# ====================
+# Bouton de déclenchement de lecture
+# ====================
+button:
+  - platform: template
+    id: button_${blueriiot_id_prefix}_doreading
+    name: "${blueriiot_name_prefix} do reading"
+    internal: true
+    on_press:
+      then:
+        - ble_client.ble_write:
+            id: ble_client_${blueriiot_id_prefix}
+            service_uuid: ${blueriiot_send_service_uuid}
+            characteristic_uuid: ${blueriiot_send_characteristic_uuid}
+            value: !lambda "return {0x01};"
+
+# ====================
+# Switch BLE
+# ====================
+switch:
+  - platform: ble_client
+    ble_client_id: ble_client_${blueriiot_id_prefix}
+    name: "${blueriiot_name_prefix} Enable"
+    id: switch_${blueriiot_id_prefix}_enable
+    restore_mode: RESTORE_DEFAULT_OFF  # survit aux redémarrages OTA (était ALWAYS_OFF)
+
+# ====================
+# Binary sensor
+# ====================
+binary_sensor:
+  - platform: template
+    id: binary_sensor_${blueriiot_id_prefix}_connected
+    name: "${blueriiot_name_prefix} Status"
+    device_class: connectivity
+    entity_category: diagnostic
+
+# ====================
+# Capteurs numériques
+# ====================
+sensor:
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_temperature
+    name: "${blueriiot_name_prefix} Temperature"
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-water
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_ph
+    name: "${blueriiot_name_prefix} pH"
+    icon: mdi:ph
+    device_class: ph                  # minuscules requis par ESPHome ≥ 2024.x
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - round: 2
+    # Plages sans chevauchement : les bornes exactes (7.1 / 7.5) tombent dans GOOD
+    on_value_range:
+      - below: 7.1
+        then:
+          - text_sensor.template.publish:
+              id: text_sensor_${blueriiot_id_prefix}_ph
+              state: "LOW"
+      - above: 7.1
+        below: 7.5
+        then:
+          - text_sensor.template.publish:
+              id: text_sensor_${blueriiot_id_prefix}_ph
+              state: "GOOD"
+      - above: 7.5
+        then:
+          - text_sensor.template.publish:
+              id: text_sensor_${blueriiot_id_prefix}_ph
+              state: "HIGH"
+
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_orp
+    name: "${blueriiot_name_prefix} Chlore Libre (RedOx ORP)"
+    unit_of_measurement: "mV"
+    icon: mdi:biohazard
+    # device_class: voltage retiré — HA attend des Volts pour ce device_class,
+    # or l'ORP est en mV : HA afficherait une unité incohérente.
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - round: 0
+    on_value_range:
+      - below: 550
+        then:
+          - text_sensor.template.publish:
+              id: text_sensor_${blueriiot_id_prefix}_orp
+              state: "VERY LOW"
+      - above: 550
+        below: 650
+        then:
+          - text_sensor.template.publish:
+              id: text_sensor_${blueriiot_id_prefix}_orp
+              state: "LOW"
+      - above: 650
+        below: 800
+        then:
+          - text_sensor.template.publish:
+              id: text_sensor_${blueriiot_id_prefix}_orp
+              state: "GOOD"
+      - above: 800
+        then:
+          - text_sensor.template.publish:
+              id: text_sensor_${blueriiot_id_prefix}_orp
+              state: "HIGH"
+
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_bat
+    name: "${blueriiot_name_prefix} Batterie"
+    unit_of_measurement: "%"
+    icon: mdi:battery-bluetooth-variant
+    device_class: battery             # minuscules requis
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - clamp:                        # évite les valeurs hors plage (ex. batterie HS)
+          min_value: 0
+          max_value: 100
+
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_salt
+    name: "${blueriiot_name_prefix} Salinité"
+    unit_of_measurement: "g/l"
+    icon: mdi:shaker-outline
+    state_class: measurement
+    accuracy_decimals: 1
+    # Concentration idéale : salt_ideal = 5.0 - 0.8 × T°C
+    # Zones : VERY HIGH > ideal+1.0 | HIGH > ideal+0.6
+    #         VERY LOW  < ideal-1.0 | LOW  < ideal-0.6 | GOOD sinon
+    on_value:
+      then:
+        - lambda: |-
+            float salt = id(sensor_${blueriiot_id_prefix}_salt).state;
+            float ideal = 5.0f - 0.8f * id(sensor_${blueriiot_id_prefix}_temperature).state;
+            const char* status;
+            if      (salt > ideal + 1.0f) status = "VERY HIGH";
+            else if (salt > ideal + 0.6f) status = "HIGH";
+            else if (salt < ideal - 1.0f) status = "VERY LOW";
+            else if (salt < ideal - 0.6f) status = "LOW";
+            else                          status = "GOOD";
+            id(text_sensor_${blueriiot_id_prefix}_salt).publish_state(status);
+
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_ecs
+    name: "${blueriiot_name_prefix} Conductivité"
+    unit_of_measurement: "µS/cm"
+    icon: mdi:water-sync
+    state_class: measurement
+    accuracy_decimals: 0
+
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_chlor
+    name: "${blueriiot_name_prefix} Chlorine"
+    unit_of_measurement: "PPM"
+    icon: mdi:water-sync
+    state_class: measurement
+    accuracy_decimals: 2             # 2 décimales — la valeur PPM peut être <1
+    filters:
+      - round: 2
+
+# ====================
+# Capteurs texte (statuts qualitatifs)
+# ====================
+text_sensor:
+  - platform: template
+    id: text_sensor_${blueriiot_id_prefix}_salt
+    name: "${blueriiot_name_prefix} Salinité Statut"
+  - platform: template
+    id: text_sensor_${blueriiot_id_prefix}_ph
+    name: "${blueriiot_name_prefix} pH Statut"
+  - platform: template
+    id: text_sensor_${blueriiot_id_prefix}_orp
+    name: "${blueriiot_name_prefix} Chlore Libre Statut"
+  - platform: template
+    id: uptime_blueriiot
+    name: "Blueriiot last update"
+
+  # ----------
+  # Réception des données BLE brutes (notification)
+  # ----------
+  - platform: ble_client
+    id: ${blueriiot_id_prefix}_reading_data
+    name: "${blueriiot_name_prefix} reading data"
+    internal: true
+    ble_client_id: ble_client_${blueriiot_id_prefix}
+    service_uuid: ${blueriiot_recieve_service_uuid}
+    characteristic_uuid: ${blueriiot_recieve_characteristic_uuid}
+    notify: true
+    update_interval: never
+    on_notify:
+      then:
+        # ------------------------------------------------------------------
+        # Protocole Blue Connect (trame de 11 octets, little-endian int16)
+        #   Réf. : https://community.home-assistant.io/t/blue-connect-pool-measurements/118901/432
+        #
+        #   Octet  1–2  : Température  → T = raw / 100  [°C]
+        #   Octet  3–4  : pH brut      → pH = (2048 - raw) / 232 + 7
+        #   Octet  5–6  : ORP brut     → ORP = raw / 4 - 5  [mV]
+        #                               Chlore = (raw/4 - 5 - 650) / 200 × 10  [PPM]
+        #   Octet  7–8  : Conductivité → ECS = 1 / (raw × 1e-6) × 1.0615  [µS/cm]
+        #                               Salt = 1 / (raw × 0.001) × 1.0615 × 500 / 1000  [g/l]
+        #   Octet  9–10 : Batterie     → Bat = (raw - 3400) / 240 × 100  [%]
+        #                               (BATT_MAX_MV=3640, BATT_MIN_MV=3400)
+        # ------------------------------------------------------------------
+        - lambda: |-
+            // Log hex brut pour debug
+            std::string rawhex = format_hex_pretty((uint8_t *) x.c_str(), x.size()).c_str();
+            ESP_LOGD("raw_hex", "%s", rawhex.c_str());
+
+            // --- Température ---
+            float temperature = (float)((int16_t)(x[2] << 8) + x[1]) / 100.0f;
+            ESP_LOGD("temp", "%.2f °C", temperature);
+            id(sensor_${blueriiot_id_prefix}_temperature).publish_state(temperature);
+
+            // --- pH ---
+            float raw_ph = (float)((int16_t)(x[4] << 8) + x[3]);
+            float ph = (2048.0f - raw_ph) / 232.0f + 7.0f;
+            ESP_LOGD("ph", "%.3f", ph);
+            id(sensor_${blueriiot_id_prefix}_ph).publish_state(ph);
+
+            // --- ORP / Chlore Libre ---
+            float raw_orp = (float)((int16_t)(x[6] << 8) + x[5]);
+            float orp = raw_orp / 4.0f - 5.0f;
+            ESP_LOGD("orp", "%.1f mV", orp);
+            id(sensor_${blueriiot_id_prefix}_orp).publish_state(orp);
+
+            // FIX : parenthèses nécessaires — ancienne formule manquait la priorité opérateurs
+            // Ancienne : raw_orp / 4.0 - 5.0 - 650.0 / 200.0 * 10.0  → orp - 32.5  (faux)
+            // Correcte : (raw_orp / 4.0 - 5.0 - 650.0) / 200.0 * 10.0
+            float chlor = (raw_orp / 4.0f - 5.0f - 650.0f) / 200.0f * 10.0f;
+            ESP_LOGD("chlor", "%.3f PPM", chlor);
+            id(sensor_${blueriiot_id_prefix}_chlor).publish_state(chlor);
+
+            // --- Conductivité & Salinité ---
+            float raw_cond = (float)((int16_t)(x[8] << 8) + x[7]);
+            if (raw_cond != 0.0f) {
+              float ecs  = 1.0f / (raw_cond * 1e-6f) * 1.0615f;
+              float salt = 1.0f / (raw_cond * 0.001f) * 1.0615f * 500.0f / 1000.0f;
+              ESP_LOGD("ecs",  "%.1f µS/cm", ecs);
+              ESP_LOGD("salt", "%.2f g/l",   salt);
+              id(sensor_${blueriiot_id_prefix}_ecs).publish_state(ecs);
+              id(sensor_${blueriiot_id_prefix}_salt).publish_state(salt);
+            } else {
+              ESP_LOGW("ecs",  "raw_cond = 0, ECS et salinité non calculés");
+              id(sensor_${blueriiot_id_prefix}_ecs).publish_state(NAN);
+              id(sensor_${blueriiot_id_prefix}_salt).publish_state(NAN);
+            }
+
+            // --- Batterie ---
+            float raw_bat = (float)((int16_t)(x[10] << 8) + x[9]);
+            float bat = (raw_bat - 3400.0f) / (3640.0f - 3400.0f) * 100.0f;
+            // Le clamp 0–100 est géré par le filtre du sensor, pas besoin ici
+            ESP_LOGD("bat", "%.1f %%", bat);
+            id(sensor_${blueriiot_id_prefix}_bat).publish_state(bat);
+
+            // --- Désactivation BLE après lecture ---
+            id(switch_${blueriiot_id_prefix}_enable).turn_off();
+
+            // --- Horodatage dernière mise à jour ---
+            // homeassistant_time doit être déclaré dans common/base.yaml
+            id(uptime_blueriiot).publish_state(
+              id(homeassistant_time).now().strftime("%Y-%m-%d %H:%M")
+            );

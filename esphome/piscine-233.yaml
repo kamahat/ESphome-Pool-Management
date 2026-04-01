@@ -4,8 +4,11 @@ substitutions:
   description: "BlueRiiot Proxy"
   device_description: "${description} - ESP32 BLE to WiFi Proxy for Blue Connect Pool Sensor"
   device_area: "Piscine"
-  board: esp32dev
+  version: "3.1"
   octet1: "233"
+  board:
+    flash_size : 4MB
+    variant: esp32c6
 
   blueriiot_mac: !secret blueriiot_mac
   blueriiot_name_prefix: !secret blueriiot_nameprefix
@@ -34,11 +37,18 @@ esphome:
   name: ${device_name}
   area: ${device_area}
   friendly_name: ${friendly_name}
+  comment: ${device_description}
+  min_version: 2025.11.0
 
 esp32:
-  board: ${board}
+  board: esp32-c6-devkitm-1
+  variant: ${board.variant}
+  flash_size: ${board.flash_size}
   framework:
     type: esp-idf
+    sdkconfig_options:
+       CONFIG_ESPTOOLPY_FLASHSIZE_4MB: y
+   
 
 api:
   encryption:
@@ -49,12 +59,21 @@ ota:
     password: !secret ota_esp-233
 
 packages:
-  wifi: !include common/wifi-iot.yaml
+  wifi: !include packages/piscine_233/wifi-iot.yaml
   device_base: !include common/base.yaml
   network-service: !include common/network-service.yaml
 
 logger:
   level: INFO
+  #level: DEBUG
+
+# wifi:
+#   networks: 
+#   - ssid: !secret wifi_ssid_2
+#     manual_ip:
+#       static_ip: 192.168.80.${octet1}
+#       gateway: 192.168.80.1
+#       subnet: 255.255.255.0
 
 # ====================
 # BLE Tracker
@@ -77,10 +96,12 @@ ble_client:
     on_connect:
       then:
         - logger.log:
-            format: "Connected to Blueriiot sensor"
+            format: "Connected to Blueriiot sensor — attente découverte GATT"
             level: INFO
         - lambda: "id(binary_sensor_${blueriiot_id_prefix}_connected).publish_state(true);"
-        - delay: 2s
+        # 5s au lieu de 2s : laisse le temps à ESPHome de finir la découverte
+        # des services GATT avant d'envoyer le write → évite le warning "unspecified"
+        - delay: 5s
         - button.press: button_${blueriiot_id_prefix}_doreading
     on_disconnect:
       then:
@@ -281,10 +302,19 @@ text_sensor:
     characteristic_uuid: ${blueriiot_recieve_characteristic_uuid}
     notify: true
     update_interval: never
+    # Valeur initiale vide pour éviter le warning "unspecified" au démarrage
+    # (le composant a besoin d'un état initial même si la valeur est vide)
+    filters:
+      - lambda: "return x;"
     on_notify:
       then:
-        # ------------------------------------------------------------------
-        # Protocole Blue Connect (trame de 11 octets, little-endian int16)
+        # Guard : la trame Blue Connect fait 11 octets minimum
+        # Si la trame est trop courte (connexion incomplète) on ignore
+        - lambda: |-
+            if (x.size() < 11) {
+              ESP_LOGW("blueriiot", "Trame trop courte (%d octets), ignorée", x.size());
+              return;
+            }
         #   Réf. : https://community.home-assistant.io/t/blue-connect-pool-measurements/118901/432
         #
         #   Octet  1–2  : Température  → T = raw / 100  [°C]

@@ -1,5 +1,5 @@
-# ESphome-Pool-Management
-Manage a swiming pool with an esphome
+# Swiming PoolManagement with ESP32 and HomeAssistant
+Manage a swiming pool with an Esphome.
 
 Integratee :
 - solar energy production

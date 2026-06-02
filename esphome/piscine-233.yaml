@@ -344,22 +344,26 @@ text_sensor:
 
             // --- ORP / Chlore Libre ---
             float raw_orp = (float)((int16_t)(x[6] << 8) + x[5]);
-            float orp = raw_orp / 4.0f - 5.0f;
+            float orp = raw_orp/ 3.86  - 21.57826;
             ESP_LOGD("orp", "%.1f mV", orp);
             id(sensor_${blueriiot_id_prefix}_orp).publish_state(orp);
 
             // FIX : parenthèses nécessaires — ancienne formule manquait la priorité opérateurs
             // Ancienne : raw_orp / 4.0 - 5.0 - 650.0 / 200.0 * 10.0  → orp - 32.5  (faux)
             // Correcte : (raw_orp / 4.0 - 5.0 - 650.0) / 200.0 * 10.0
-            float chlor = (raw_orp / 4.0f - 5.0f - 650.0f) / 200.0f * 10.0f;
-            ESP_LOGD("chlor", "%.3f PPM", chlor);
-            id(sensor_${blueriiot_id_prefix}_chlor).publish_state(chlor);
+            //float chlor = (raw_orp / 4.0f - 5.0f - 650.0f) / 200.0f * 10.0f;
+            //ESP_LOGD("chlor", "%.3f PPM", chlor);
+            //id(sensor_${blueriiot_id_prefix}_chlor).publish_state(chlor);
 
             // --- Conductivité & Salinité ---
+            // Bytes 7-8: Salinity (g/L) — divisor /18.0 calibrated against
+            // the official Blueriiot app. Adjust if your app shows a
+            // different value (see README "Calibration").
             float raw_cond = (float)((int16_t)(x[8] << 8) + x[7]);
             if (raw_cond != 0.0f) {
               float ecs  = 1.0f / (raw_cond * 1e-6f) * 1.0615f;
-              float salt = 1.0f / (raw_cond * 0.001f) * 1.0615f * 500.0f / 1000.0f;
+              //float salt = 1.0f / (raw_cond * 0.001f) * 1.0615f * 500.0f / 1000.0f;
+              float salt = 1.0f / (raw_cond / 18.0f);
               ESP_LOGD("ecs",  "%.1f µS/cm", ecs);
               ESP_LOGD("salt", "%.2f g/l",   salt);
               id(sensor_${blueriiot_id_prefix}_ecs).publish_state(ecs);
@@ -371,8 +375,10 @@ text_sensor:
             }
 
             // --- Batterie ---
+            // Byte 11: Battery (%)
             float raw_bat = (float)((int16_t)(x[10] << 8) + x[9]);
-            float bat = (raw_bat - 3400.0f) / (3640.0f - 3400.0f) * 100.0f;
+            //float bat = (raw_bat - 3400.0f) / (3640.0f - 3400.0f) * 100.0f;
+            float bat = (float)(raw_bat / 36) * 100.0f;
             // Le clamp 0–100 est géré par le filtre du sensor, pas besoin ici
             ESP_LOGD("bat", "%.1f %%", bat);
             id(sensor_${blueriiot_id_prefix}_bat).publish_state(bat);

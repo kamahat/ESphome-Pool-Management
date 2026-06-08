@@ -35,10 +35,12 @@ substitutions:
 
 esphome:
   name: ${device_name}
-  area: ${device_area}
   friendly_name: ${friendly_name}
   comment: ${device_description}
   min_version: 2025.11.0
+  # area retiré volontairement : ESPHome 2025.11+ utilise l'area comme préfixe
+  # dans les entity_ids (piscine_ + piscine_233_ = doublon). Assigner l'area
+  # manuellement dans HA sans impacter les entity_ids.
 
 esp32:
   board: esp32-c6-devkitm-1
@@ -61,7 +63,9 @@ ota:
 packages:
   wifi: !include packages/piscine_233/wifi-iot.yaml
   device_base: !include common/base.yaml
-  network-service: !include common/network-service.yaml
+  # network-service commun retiré : web_server v3 + http_request + ota:web_server
+  # représentaient ~200 KB. Flash à 99.7% → trop critique pour les garder.
+  # OTA via ESPHome (port 3232) suffit, api port 6053 est la valeur par défaut.
 
 logger:
   level: INFO

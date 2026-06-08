@@ -122,21 +122,6 @@ time:
           - script.execute: _fonctionnement_filtration
 
     on_time:
-      # Toutes les 5 min : timer protection électrolyseur
-      - seconds: 0
-        minutes: /5
-        then:
-          - lambda: |-
-              if (!id(electrolyse_relay).state) return;
-              if (id(electrolyse_running_time) > id(electrolyse_running_threshold).state) {
-                id(script_pause_electrolyse).execute();
-                id(script_init_electrolyseur).execute();
-              } else {
-                id(electrolyse_running_time) += 5;
-                ESP_LOGI("electrolyse", "Fonctionnement: %d min / Seuil: %.0f min",
-                  id(electrolyse_running_time), id(electrolyse_running_threshold).state);
-              }
-
       # 00h00 : reset compteur filtration journalier
       - seconds: 0
         minutes: 0

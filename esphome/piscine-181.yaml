@@ -14,7 +14,7 @@ substitutions:
   device_description: "Pilotage Piscine Local Piscine"
   device_area:        "Piscine"
   board:              az-delivery-devkit-v4
-  pression_max:       "1.5"
+  pression_max:       "1.2"
   net:
     octet1: "181"
     IP1:    192.168.80.${net.octet1}

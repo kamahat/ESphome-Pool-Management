@@ -1,25 +1,20 @@
 # packages/piscine_181/filtration.yaml
-# Modes de filtration : Palier | Classique | Abaque | Horaire | Ma_f | At_f
+# Modes : Palier | Classique | Abaque | Horaire | Marche Force | Arret Force
 #
-# Logique toutes les 5s (_fonctionnement_filtration) :
-#   P1 ent_at_force ON   -> Pompe OFF
-#   P2 g_flag_hg ON      -> Pompe ON  (hors_gel.yaml)
-#   P3 At_f              -> Pompe OFF
-#   P4 Ma_f              -> Pompe ON
-#   P5 Palier/Classique/Abaque -> calcul durée + condition solaire + heure pivot
-#   P6 Horaire           -> plage fixe (debut_mode_horaire + duree_mode_horaire)
+# P0 mode_choc ON      -> Pompe ON  (ignore abaque + solaire)
+# P1 ent_at_force ON   -> Pompe OFF
+# P2 g_flag_hg ON      -> Pompe ON  (hors_gel.yaml)
+# P3 Arret Force       -> Pompe OFF
+# P4 Marche Force      -> Pompe ON
+# P5 Palier/Classique/Abaque -> calcul duree + solaire + pivot
+# P6 Horaire           -> plage fixe
 #
-# Condition solaire (modes Classique et Abaque uniquement) :
-#   Si seuil_solaire > 0 ET production_solaire < seuil -> Pompe OFF
-#   seuil_solaire = 0 désactive la condition (mode dégradé)
-#
-# Dépendances :
-#   sensor     : temp_piscine, production_solaire  (capteurs.yaml)
-#   switch     : cde_ppe_filtration, ent_at_force  (pompe.yaml)
-#   global     : g_flag_hg                         (hors_gel.yaml)
-#   global     : flag_tempo_ppe_filtre              (pompe.yaml)
-#   text_sensor: aff_heure_filtration              (capteurs.yaml)
-#   time       : ha_time                           (piscine-181.yaml)
+# Mode Abaque :
+#   duree_base  = polynome(T) * coeff_filtration/100
+#   duree_cible = duree_base * coef_marge  (defaut 1.4)
+#   duree_cible = clamp(duree_cible, duree_min_h, duree_max_h)
+#   Avant heure_butoir_complement : solaire + fenetre pivot
+#   Apres heure_butoir_complement : si cumule < cible -> pompe ON (ignore solaire)
 
 globals:
   - id: g_memoire_temp_eau
@@ -32,14 +27,12 @@ globals:
     restore_value: no
     initial_value: 'false'
 
-  # Timestamp Unix de la dernière réception d'une T° BLE valide
-  # Initialisé à 0 = jamais reçu. Mis à jour par on_value dans capteurs.yaml
   - id: g_ble_temp_last_update
     type: int
     restore_value: no
     initial_value: '0'
 
-  - id: g_tps_filtration   # Durée calculée en heures
+  - id: g_tps_filtration
     type: float
     restore_value: no
     initial_value: '8'
@@ -52,7 +45,6 @@ globals:
     type: float
     initial_value: '5'
 
-  # Seuils mode Palier (°C) - Vol ~50m³, pompe 12m³/h => 1 cycle = 4.2h
   - id: g_temp_palier1
     type: float
     initial_value: '10'
@@ -81,7 +73,6 @@ globals:
     type: float
     initial_value: '14'
 
-  # Coefficients mode Abaque : f(T) = a*T³ + b*T² + c*T + d
   - id: g_abaque_a
     type: float
     initial_value: '0.00335'
@@ -95,7 +86,6 @@ globals:
     type: float
     initial_value: '-10.72859'
 
-  # Variables intermédiaires partagées entre scripts
   - id: g_hh
     type: int
     initial_value: '0'
@@ -106,13 +96,24 @@ globals:
     type: int
     initial_value: '0'
 
+  - id: g_complement_actif
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
 select:
   - platform: template
     name: "Mode Fonctionnement Filtration"
     id: _Mode_Fonctionnement_filtration
     optimistic: true
     restore_value: true
-    options: [Palier, Classique, Abaque, Horaire, Ma_f, At_f]
+    options:
+      - "Palier"
+      - "Classique"
+      - "Abaque"
+      - "Horaire"
+      - "Marche Force"
+      - "Arret Force"
     on_value:
       then:
         - script.execute: _fonctionnement_filtration
@@ -133,7 +134,7 @@ datetime:
   - platform: template
     id: h_debut
     type: time
-    name: "Heure Début Filtration"
+    name: "Heure Debut Filtration"
     optimistic: yes
     initial_value: "00:00:00"
     restore_value: false
@@ -149,7 +150,7 @@ datetime:
   - platform: template
     id: duree_filtration_calc
     type: time
-    name: "Durée Filtration"
+    name: "Duree Filtration"
     optimistic: yes
     initial_value: "00:00:00"
     restore_value: false
@@ -157,7 +158,7 @@ datetime:
   - platform: template
     id: debut_mode_horaire
     type: time
-    name: "Début Mode Horaire"
+    name: "Debut Mode Horaire"
     optimistic: yes
     initial_value: "08:00:00"
     restore_value: true
@@ -165,9 +166,17 @@ datetime:
   - platform: template
     id: duree_mode_horaire
     type: time
-    name: "Durée Mode Horaire"
+    name: "Duree Mode Horaire"
     optimistic: yes
     initial_value: "08:00:00"
+    restore_value: true
+
+  - platform: template
+    id: heure_butoir_complement
+    type: time
+    name: "Heure Butoir Complement"
+    optimistic: yes
+    initial_value: "18:00:00"
     restore_value: true
 
 number:
@@ -198,7 +207,7 @@ number:
     initial_value: 100
 
   - platform: template
-    name: "Durée Arrêt Journalier"
+    name: "Duree Arret Journalier"
     id: duree_at_jour
     optimistic: true
     restore_value: true
@@ -209,7 +218,6 @@ number:
     step: 0.5
     initial_value: 4
 
-  # Seuil solaire pour modes Classique/Abaque (0 = désactivé)
   - platform: template
     name: "Seuil Solaire Filtration"
     id: seuil_solaire
@@ -223,9 +231,67 @@ number:
     icon: mdi:solar-power
     initial_value: 1000
 
+  - platform: template
+    name: "Coefficient Marge Filtration"
+    id: coef_marge
+    optimistic: true
+    restore_value: true
+    mode: box
+    min_value: 1.0
+    max_value: 1.6
+    step: 0.05
+    icon: mdi:chart-bar
+    initial_value: 1.4
+
+  - platform: template
+    name: "Duree Min Filtration"
+    id: duree_min_h
+    optimistic: true
+    restore_value: true
+    mode: box
+    min_value: 0
+    max_value: 12
+    unit_of_measurement: "h"
+    step: 0.5
+    icon: mdi:timer-minus-outline
+    initial_value: 6
+
+  - platform: template
+    name: "Duree Max Filtration"
+    id: duree_max_h
+    optimistic: true
+    restore_value: true
+    mode: box
+    min_value: 12
+    max_value: 24
+    unit_of_measurement: "h"
+    step: 0.5
+    icon: mdi:timer-plus-outline
+    initial_value: 22
+
+switch:
+  - platform: template
+    name: "Mode Choc Filtration"
+    id: mode_choc
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: mdi:alert
+    on_turn_on:
+      then:
+        - logger.log:
+            format: "MODE CHOC: Active -> Pompe 24/24"
+            level: WARN
+        - script.execute: _fonctionnement_filtration
+    on_turn_off:
+      then:
+        - logger.log:
+            format: "MODE CHOC: Desactive -> retour normal"
+            level: INFO
+        - script.execute: _fonctionnement_filtration
+
 button:
   - platform: template
-    name: "Arrêt Filtration Journée"
+    name: "Arret Filtration Journee"
     id: _arret_jour
     on_press:
       then:
@@ -251,26 +317,18 @@ interval:
       - script.execute: _memorisation_temperature_eau
 
 script:
-  # Sélection de la source de T° eau et mémorisation dans g_memoire_temp_eau
-  #
-  # Priorité :
-  #   Pompe ON + tempo écoulée  -> Dallas (mesure en circuit, plus fiable)
-  #   Pompe OFF + BLE < 1h      -> BLE Blue Connect (eau au repos, valide)
-  #   Pompe OFF + BLE >= 1h     -> conservation de la dernière valeur mémorisée
   - id: _memorisation_temperature_eau
     then:
       - if:
-          # CAS 1 : pompe en marche et T° eau stabilisée après recirculation
           condition:
             lambda: 'return id(flag_tempo_ppe_filtre) && !isnan(id(temp_piscine).state);'
           then:
             - lambda: 'id(g_memoire_temp_eau) = id(temp_piscine).state;'
             - logger.log:
-                format: "TEMP: Source=Dallas / T°=%.1f°C"
+                format: "TEMP: Dallas T=%.1fC"
                 args: [ 'id(g_memoire_temp_eau)' ]
                 level: DEBUG
           else:
-            # CAS 2 : pompe arrêtée -> BLE si valeur fraîche (< 3600s)
             - if:
                 condition:
                   lambda: |-
@@ -282,27 +340,36 @@ script:
                 then:
                   - lambda: 'id(g_memoire_temp_eau) = id(temp_eau_ble).state;'
                   - logger.log:
-                      format: "TEMP: Source=BLE / T°=%.1f°C / Age=%ds"
+                      format: "TEMP: BLE T=%.1fC age=%ds"
                       args: [ 'id(g_memoire_temp_eau)',
                               'id(ha_time).now().timestamp - id(g_ble_temp_last_update)' ]
                       level: DEBUG
                 else:
                   - logger.log:
-                      format: "TEMP: BLE indisponible ou trop ancienne -> conservation %.1f°C"
+                      format: "TEMP: BLE indispo -> conservation %.1fC"
                       args: [ 'id(g_memoire_temp_eau)' ]
                       level: DEBUG
 
-  # Calcul durée + décision pompe selon le mode actif
   - id: _fonctionnement_filtration
     then:
-      # P1 - Arrêt forcé manuel
+      # P0 - Mode Choc
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(mode_choc).state;'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
+          then:
+            - switch.turn_on: cde_ppe_filtration
+            - lambda: 'id(aff_heure_filtration).publish_state("Mode-Choc");'
+
+      # P1 - Arret force manuel
       - if:
           condition:
             lambda: 'return id(ent_at_force).state;'
           then:
             - switch.turn_off: cde_ppe_filtration
 
-      # P2 - Hors gel (hors_gel.yaml)
+      # P2 - Hors gel
       - if:
           condition:
             lambda: 'return id(g_flag_hg);'
@@ -310,32 +377,32 @@ script:
             - switch.turn_on: cde_ppe_filtration
             - lambda: 'id(aff_heure_filtration).publish_state("Hors-Gel");'
 
-      # P3 - At_f
+      # P3 - Arret Force (mode select)
       - if:
           condition:
             and:
-              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "At_f";'
-              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
+              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Arret Force";'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg) && !id(mode_choc).state;'
           then:
             - switch.turn_off: cde_ppe_filtration
-            - lambda: 'id(aff_heure_filtration).publish_state("At_force");'
+            - lambda: 'id(aff_heure_filtration).publish_state("Arret_force");'
 
-      # P4 - Ma_f
+      # P4 - Marche Force (mode select)
       - if:
           condition:
             and:
-              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Ma_f";'
-              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
+              - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Marche Force";'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg) && !id(mode_choc).state;'
           then:
             - switch.turn_on: cde_ppe_filtration
-            - lambda: 'id(aff_heure_filtration).publish_state("Ma_force");'
+            - lambda: 'id(aff_heure_filtration).publish_state("Marche_force");'
 
       # P5 - Palier
       - if:
           condition:
             and:
               - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Palier";'
-              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg) && !id(mode_choc).state;'
           then:
             - lambda: |-
                 float t = id(g_memoire_temp_eau);
@@ -346,7 +413,7 @@ script:
                 else                             id(g_tps_filtration) = id(g_tps_palier5);
                 id(g_tps_filtration) *= id(coeff_filtration).state / 100.0;
             - logger.log:
-                format: "FILTRATION Palier: T=%.1f°C -> %.2fh"
+                format: "FILTRATION Palier: T=%.1f -> %.2fh"
                 args: [ 'id(g_memoire_temp_eau)', 'id(g_tps_filtration)' ]
                 level: INFO
             - script.execute: _calcul_hdebut_hfin
@@ -356,14 +423,14 @@ script:
           condition:
             and:
               - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Classique";'
-              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg) && !id(mode_choc).state;'
           then:
             - lambda: |-
                 id(g_tps_filtration) = id(g_memoire_temp_eau) / 2.0;
                 id(g_tps_filtration) = min(id(g_temps_max_filtration), max(id(g_temps_min_filtration), id(g_tps_filtration)));
                 id(g_tps_filtration) *= id(coeff_filtration).state / 100.0;
             - logger.log:
-                format: "FILTRATION Classique: T=%.1f°C -> %.2fh"
+                format: "FILTRATION Classique: T=%.1f -> %.2fh"
                 args: [ 'id(g_memoire_temp_eau)', 'id(g_tps_filtration)' ]
                 level: INFO
             - if:
@@ -372,47 +439,74 @@ script:
                 then:
                   - switch.turn_off: cde_ppe_filtration
                   - logger.log:
-                      format: "FILTRATION Classique: Solaire %.0fW < seuil %.0fW -> Pompe OFF"
+                      format: "Classique: Solaire %.0fW < %.0fW -> OFF"
                       args: [ 'id(production_solaire).state', 'id(seuil_solaire).state' ]
                       level: INFO
                 else:
                   - script.execute: _calcul_hdebut_hfin
 
-      # P5 - Abaque (polynôme cubique) + condition solaire
+      # P5 - Abaque + coef_marge + complement nuit
       - if:
           condition:
             and:
               - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Abaque";'
-              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg) && !id(mode_choc).state;'
           then:
             - lambda: |-
                 float t = id(g_memoire_temp_eau);
-                id(g_tps_filtration) = id(g_abaque_a)*pow(t,3) + id(g_abaque_b)*pow(t,2)
-                                     + id(g_abaque_c)*t + id(g_abaque_d);
-                id(g_tps_filtration) *= id(coeff_filtration).state / 100.0;
-                id(g_tps_filtration) = min(id(g_temps_max_filtration), max(id(g_temps_min_filtration), id(g_tps_filtration)));
-            - logger.log:
-                format: "FILTRATION Abaque: T=%.1f°C -> %.2fh"
-                args: [ 'id(g_memoire_temp_eau)', 'id(g_tps_filtration)' ]
-                level: INFO
+                float duree_base = id(g_abaque_a)*pow(t,3) + id(g_abaque_b)*pow(t,2)
+                                 + id(g_abaque_c)*t + id(g_abaque_d);
+                duree_base *= id(coeff_filtration).state / 100.0f;
+                float duree_cible = duree_base * id(coef_marge).state;
+                duree_cible = min(id(duree_max_h).state, max(id(duree_min_h).state, duree_cible));
+                id(g_tps_filtration) = duree_cible;
+                ESP_LOGI("filtration", "Abaque: T=%.1f base=%.2fh cible=%.2fh (x%.2f)",
+                  t, duree_base, duree_cible, id(coef_marge).state);
+            - lambda: |-
+                if (!id(ha_time).now().is_valid()) return;
+                int now_min = id(ha_time).now().hour * 60 + id(ha_time).now().minute;
+                int but_min = id(heure_butoir_complement).hour * 60 + id(heure_butoir_complement).minute;
+                float cible_s = id(g_tps_filtration) * 3600.0f;
+                float cumul_s = id(_temps_fonctionnement_ppe_piscine_jour).state;
+                if (now_min >= but_min) {
+                  bool nouveau = (cumul_s < cible_s);
+                  if (nouveau != id(g_complement_actif))
+                    ESP_LOGI("filtration", "Complement: %s (%.1fh/%.1fh)",
+                      nouveau ? "ACTIF" : "COMPLET", cumul_s/3600.0f, cible_s/3600.0f);
+                  id(g_complement_actif) = nouveau;
+                }
             - if:
                 condition:
-                  lambda: 'return id(seuil_solaire).state > 0 && id(production_solaire).state < id(seuil_solaire).state;'
+                  lambda: |-
+                    return id(g_complement_actif)
+                      && (id(_temps_fonctionnement_ppe_piscine_jour).state < id(g_tps_filtration) * 3600.0f);
                 then:
-                  - switch.turn_off: cde_ppe_filtration
-                  - logger.log:
-                      format: "FILTRATION Abaque: Solaire %.0fW < seuil %.0fW -> Pompe OFF"
-                      args: [ 'id(production_solaire).state', 'id(seuil_solaire).state' ]
-                      level: INFO
+                  - switch.turn_on: cde_ppe_filtration
+                  - lambda: |-
+                      char buf[48];
+                      snprintf(buf, sizeof(buf), "Complt %.1fh/%.1fh",
+                        id(_temps_fonctionnement_ppe_piscine_jour).state / 3600.0f,
+                        id(g_tps_filtration));
+                      id(aff_heure_filtration).publish_state(buf);
                 else:
-                  - script.execute: _calcul_hdebut_hfin
+                  - if:
+                      condition:
+                        lambda: 'return id(seuil_solaire).state > 0 && id(production_solaire).state < id(seuil_solaire).state;'
+                      then:
+                        - switch.turn_off: cde_ppe_filtration
+                        - logger.log:
+                            format: "Abaque: Solaire %.0fW < %.0fW -> OFF"
+                            args: [ 'id(production_solaire).state', 'id(seuil_solaire).state' ]
+                            level: INFO
+                      else:
+                        - script.execute: _calcul_hdebut_hfin
 
-      # P6 - Horaire (plage fixe)
+      # P6 - Horaire
       - if:
           condition:
             and:
               - lambda: 'return id(_Mode_Fonctionnement_filtration).current_option() == "Horaire";'
-              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg);'
+              - lambda: 'return !id(ent_at_force).state && !id(g_flag_hg) && !id(mode_choc).state;'
           then:
             - datetime.time.set:
                 id: h_debut
@@ -434,7 +528,6 @@ script:
                 id(aff_heure_filtration).publish_state(buf);
             - script.execute: _calcul_ma_at_ppe_filtration
 
-  # Calcule h_debut et h_fin centrés sur heure_pivot
   - id: _calcul_hdebut_hfin
     mode: single
     then:
@@ -444,7 +537,7 @@ script:
             return {second: 0, minute: id(heure_pivot).minute, hour: id(heure_pivot).hour};
       - lambda: |-
           double p = id(heure_pivot).hour * 60.0 + id(heure_pivot).minute;
-          double d = p - id(g_tps_filtration) * 30.0;  // /2*60 = *30
+          double d = p - id(g_tps_filtration) * 30.0;
           if (d < 0) d += 1440;
           id(g_hh) = (int)(d / 60) % 24;
           id(g_mm) = (int)d % 60;
@@ -484,7 +577,6 @@ script:
           level: INFO
       - script.execute: _calcul_ma_at_ppe_filtration
 
-  # Compare l'heure courante à la fenêtre h_debut/h_fin -> commande pompe
   - id: _calcul_ma_at_ppe_filtration
     mode: single
     then:
@@ -493,7 +585,7 @@ script:
             time.has_time:
           else:
             - logger.log:
-                format: "FILTRATION: heure non sync, pompe inchangée"
+                format: "FILTRATION: heure non sync, pompe inchangee"
                 level: WARN
       - if:
           condition:

@@ -112,6 +112,22 @@ ble_client:
         - lambda: "id(binary_sensor_${blueriiot_id_prefix}_connected).publish_state(false);"
 
 # ====================
+# Offsets de calibration (persistés en flash ESP)
+globals:
+  - id: ph_offset
+    type: float
+    restore_value: true
+    initial_value: '0.0'
+  - id: orp_offset
+    type: float
+    restore_value: true
+    initial_value: '0.0'
+  - id: conductivity_offset
+    type: float
+    restore_value: true
+    initial_value: '0.0'
+
+# ====================
 # Bouton de déclenchement de lecture
 # ====================
 button:
@@ -126,6 +142,72 @@ button:
             service_uuid: ${blueriiot_send_service_uuid}
             characteristic_uuid: ${blueriiot_send_characteristic_uuid}
             value: !lambda "return {0x01};"
+  - platform: template
+    name: "${blueriiot_name_prefix} Calibrer pH"
+    entity_category: config
+    icon: mdi:ph
+    on_press:
+      then:
+        - globals.set:
+            id: ph_offset
+            value: !lambda 'return id(ph_ref).state - id(sensor_${blueriiot_id_prefix}_ph).state;'
+  - platform: template
+    name: "${blueriiot_name_prefix} Calibrer ORP"
+    entity_category: config
+    icon: mdi:molecule-cl
+    on_press:
+      then:
+        - globals.set:
+            id: orp_offset
+            value: !lambda 'return id(orp_ref).state - id(sensor_${blueriiot_id_prefix}_orp).state;'
+  - platform: template
+    name: "${blueriiot_name_prefix} Calibrer Conductivite"
+    entity_category: config
+    icon: mdi:flash
+    on_press:
+      then:
+        - globals.set:
+            id: conductivity_offset
+            value: !lambda 'return id(conductivity_ref).state - id(sensor_${blueriiot_id_prefix}_ecs).state;'
+
+# ====================
+# Valeurs de référence pour calibration
+number:
+  - platform: template
+    name: "${blueriiot_name_prefix} pH Reference"
+    id: ph_ref
+    min_value: 0.0
+    max_value: 14.0
+    step: 0.01
+    initial_value: 7.2
+    restore_value: true
+    optimistic: true
+    entity_category: config
+    icon: mdi:ph
+  - platform: template
+    name: "${blueriiot_name_prefix} ORP Reference"
+    id: orp_ref
+    unit_of_measurement: mV
+    min_value: -500.0
+    max_value: 1000.0
+    step: 1.0
+    initial_value: 650.0
+    restore_value: true
+    optimistic: true
+    entity_category: config
+    icon: mdi:molecule-cl
+  - platform: template
+    name: "${blueriiot_name_prefix} Conductivite Reference"
+    id: conductivity_ref
+    unit_of_measurement: "uS/cm"
+    min_value: 0.0
+    max_value: 20000.0
+    step: 10.0
+    initial_value: 5000.0
+    restore_value: true
+    optimistic: true
+    entity_category: config
+    icon: mdi:flash
 
 # ====================
 # Switch BLE
@@ -250,7 +332,7 @@ sensor:
       then:
         - lambda: |-
             float salt = id(sensor_${blueriiot_id_prefix}_salt).state;
-            float ideal = 5.0f - 0.8f * id(sensor_${blueriiot_id_prefix}_temperature).state;
+            float ideal = 4.0f + 0.02f * max(0.0f, 25.0f - id(sensor_${blueriiot_id_prefix}_temperature).state);
             const char* status;
             if      (salt > ideal + 1.0f) status = "VERY HIGH";
             else if (salt > ideal + 0.6f) status = "HIGH";
@@ -344,13 +426,13 @@ text_sensor:
             float raw_ph = (float)((int16_t)(x[4] << 8) + x[3]);
             float ph = (2048.0f - raw_ph) / 232.0f + 7.0f;
             ESP_LOGD("ph", "%.3f", ph);
-            id(sensor_${blueriiot_id_prefix}_ph).publish_state(ph);
+            id(sensor_${blueriiot_id_prefix}_ph).publish_state(ph + id(ph_offset).value);
 
             // --- ORP / Chlore Libre ---
             float raw_orp = (float)((int16_t)(x[6] << 8) + x[5]);
             float orp = raw_orp/ 3.86  - 21.57826;
             ESP_LOGD("orp", "%.1f mV", orp);
-            id(sensor_${blueriiot_id_prefix}_orp).publish_state(orp);
+            id(sensor_${blueriiot_id_prefix}_orp).publish_state(orp + id(orp_offset).value);
 
             // FIX : parenthèses nécessaires — ancienne formule manquait la priorité opérateurs
             // Ancienne : raw_orp / 4.0 - 5.0 - 650.0 / 200.0 * 10.0  → orp - 32.5  (faux)
@@ -363,11 +445,10 @@ text_sensor:
             // Bytes 7-8: Salinity (g/L) — divisor /18.0 calibrated against
             // the official Blueriiot app. Adjust if your app shows a
             // different value (see README "Calibration").
-            float raw_cond = (float)((int16_t)(x[8] << 8) + x[7]);
+            float raw_cond = (float)(x[7]);
             if (raw_cond != 0.0f) {
-              float ecs  = 1.0f / (raw_cond * 1e-6f) * 1.0615f;
-              //float salt = 1.0f / (raw_cond * 0.001f) * 1.0615f * 500.0f / 1000.0f;
-              float salt = 1.0f / (raw_cond / 18.0f);
+              float ecs  = 1.0f / (raw_cond * 1e-6f) * 1.0615f + id(conductivity_offset).value;
+              float salt = (ecs > 0.0f ? ecs : 0.0f) / 2000.0f;
               ESP_LOGD("ecs",  "%.1f µS/cm", ecs);
               ESP_LOGD("salt", "%.2f g/l",   salt);
               id(sensor_${blueriiot_id_prefix}_ecs).publish_state(ecs);

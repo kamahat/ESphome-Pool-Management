@@ -359,6 +359,34 @@ sensor:
     filters:
       - round: 2
 
+
+  # --- Capteurs diagnostics (valeurs brutes sans offset de calibration) ---
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_ph_brut
+    name: "${blueriiot_name_prefix} pH Brut"
+    icon: mdi:ph
+    state_class: measurement
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_orp_brut
+    name: "${blueriiot_name_prefix} ORP Brut"
+    unit_of_measurement: "mV"
+    icon: mdi:molecule-cl
+    state_class: measurement
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    id: sensor_${blueriiot_id_prefix}_ecs_brut
+    name: "${blueriiot_name_prefix} Conductivite Brute"
+    unit_of_measurement: "µS/cm"
+    icon: mdi:flash
+    state_class: measurement
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
 # ====================
 # Capteurs texte (statuts qualitatifs)
 # ====================
@@ -426,13 +454,15 @@ text_sensor:
             float raw_ph = (float)((int16_t)(x[4] << 8) + x[3]);
             float ph = (2048.0f - raw_ph) / 232.0f + 7.0f;
             ESP_LOGD("ph", "%.3f", ph);
-            id(sensor_${blueriiot_id_prefix}_ph).publish_state(ph + id(ph_offset).value);
+            id(sensor_${blueriiot_id_prefix}_ph_brut).publish_state(ph);
+            id(sensor_${blueriiot_id_prefix}_ph).publish_state(ph + id(ph_offset));
 
             // --- ORP / Chlore Libre ---
             float raw_orp = (float)((int16_t)(x[6] << 8) + x[5]);
             float orp = raw_orp/ 3.86  - 21.57826;
             ESP_LOGD("orp", "%.1f mV", orp);
-            id(sensor_${blueriiot_id_prefix}_orp).publish_state(orp + id(orp_offset).value);
+            id(sensor_${blueriiot_id_prefix}_orp_brut).publish_state(orp);
+            id(sensor_${blueriiot_id_prefix}_orp).publish_state(orp + id(orp_offset));
 
             // FIX : parenthèses nécessaires — ancienne formule manquait la priorité opérateurs
             // Ancienne : raw_orp / 4.0 - 5.0 - 650.0 / 200.0 * 10.0  → orp - 32.5  (faux)
@@ -447,10 +477,12 @@ text_sensor:
             // different value (see README "Calibration").
             float raw_cond = (float)(x[7]);
             if (raw_cond != 0.0f) {
-              float ecs  = 1.0f / (raw_cond * 1e-6f) * 1.0615f + id(conductivity_offset).value;
+              float ecs_brut = 1.0f / (raw_cond * 1e-6f) * 1.0615f;
+              float ecs  = ecs_brut + id(conductivity_offset);
               float salt = (ecs > 0.0f ? ecs : 0.0f) / 2000.0f;
               ESP_LOGD("ecs",  "%.1f µS/cm", ecs);
               ESP_LOGD("salt", "%.2f g/l",   salt);
+              id(sensor_${blueriiot_id_prefix}_ecs_brut).publish_state(ecs_brut);
               id(sensor_${blueriiot_id_prefix}_ecs).publish_state(ecs);
               id(sensor_${blueriiot_id_prefix}_salt).publish_state(salt);
             } else {

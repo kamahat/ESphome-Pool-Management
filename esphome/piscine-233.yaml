@@ -133,7 +133,7 @@ globals:
 button:
   - platform: template
     id: button_${blueriiot_id_prefix}_doreading
-    name: "${blueriiot_name_prefix} do reading"
+    name: "do reading"
     internal: true
     on_press:
       then:
@@ -143,7 +143,7 @@ button:
             characteristic_uuid: ${blueriiot_send_characteristic_uuid}
             value: !lambda "return {0x01};"
   - platform: template
-    name: "${blueriiot_name_prefix} Calibrer pH"
+    name: "Calibrer pH"
     entity_category: config
     icon: mdi:ph
     on_press:
@@ -152,7 +152,7 @@ button:
             id: ph_offset
             value: !lambda 'return id(ph_ref).state - id(sensor_${blueriiot_id_prefix}_ph).state;'
   - platform: template
-    name: "${blueriiot_name_prefix} Calibrer ORP"
+    name: "Calibrer ORP"
     entity_category: config
     icon: mdi:molecule-cl
     on_press:
@@ -161,7 +161,7 @@ button:
             id: orp_offset
             value: !lambda 'return id(orp_ref).state - id(sensor_${blueriiot_id_prefix}_orp).state;'
   - platform: template
-    name: "${blueriiot_name_prefix} Calibrer Conductivite"
+    name: "Calibrer Conductivite"
     entity_category: config
     icon: mdi:flash
     on_press:
@@ -174,7 +174,7 @@ button:
 # Valeurs de référence pour calibration
 number:
   - platform: template
-    name: "${blueriiot_name_prefix} pH Reference"
+    name: "pH Reference"
     id: ph_ref
     min_value: 0.0
     max_value: 14.0
@@ -185,7 +185,7 @@ number:
     entity_category: config
     icon: mdi:ph
   - platform: template
-    name: "${blueriiot_name_prefix} ORP Reference"
+    name: "ORP Reference"
     id: orp_ref
     unit_of_measurement: mV
     min_value: -500.0
@@ -197,7 +197,7 @@ number:
     entity_category: config
     icon: mdi:molecule-cl
   - platform: template
-    name: "${blueriiot_name_prefix} Conductivite Reference"
+    name: "Conductivite Reference"
     id: conductivity_ref
     unit_of_measurement: "uS/cm"
     min_value: 0.0
@@ -215,7 +215,7 @@ number:
 switch:
   - platform: ble_client
     ble_client_id: ble_client_${blueriiot_id_prefix}
-    name: "${blueriiot_name_prefix} Enable"
+    name: "Enable"
     id: switch_${blueriiot_id_prefix}_enable
     restore_mode: RESTORE_DEFAULT_OFF  # survit aux redémarrages OTA (était ALWAYS_OFF)
 
@@ -225,7 +225,7 @@ switch:
 binary_sensor:
   - platform: template
     id: binary_sensor_${blueriiot_id_prefix}_connected
-    name: "${blueriiot_name_prefix} Status"
+    name: "Status"
     device_class: connectivity
     entity_category: diagnostic
 
@@ -235,7 +235,7 @@ binary_sensor:
 sensor:
   - platform: template
     id: sensor_${blueriiot_id_prefix}_temperature
-    name: "${blueriiot_name_prefix} Temperature"
+    name: "Temperature"
     unit_of_measurement: "°C"
     icon: mdi:thermometer-water
     device_class: temperature
@@ -244,7 +244,7 @@ sensor:
 
   - platform: template
     id: sensor_${blueriiot_id_prefix}_ph
-    name: "${blueriiot_name_prefix} pH"
+    name: "pH"
     icon: mdi:ph
     device_class: ph                  # minuscules requis par ESPHome ≥ 2024.x
     state_class: measurement
@@ -272,7 +272,7 @@ sensor:
 
   - platform: template
     id: sensor_${blueriiot_id_prefix}_orp
-    name: "${blueriiot_name_prefix} Chlore Libre (RedOx ORP)"
+    name: "Chlore Libre (RedOx ORP)"
     unit_of_measurement: "mV"
     icon: mdi:biohazard
     # device_class: voltage retiré — HA attend des Volts pour ce device_class,
@@ -307,7 +307,7 @@ sensor:
 
   - platform: template
     id: sensor_${blueriiot_id_prefix}_bat
-    name: "${blueriiot_name_prefix} Batterie"
+    name: "Batterie"
     unit_of_measurement: "%"
     icon: mdi:battery-bluetooth-variant
     device_class: battery             # minuscules requis
@@ -320,7 +320,7 @@ sensor:
 
   - platform: template
     id: sensor_${blueriiot_id_prefix}_salt
-    name: "${blueriiot_name_prefix} Salinité"
+    name: "Salinité"
     unit_of_measurement: "g/l"
     icon: mdi:shaker-outline
     state_class: measurement
@@ -343,7 +343,7 @@ sensor:
 
   - platform: template
     id: sensor_${blueriiot_id_prefix}_ecs
-    name: "${blueriiot_name_prefix} Conductivité"
+    name: "Conductivité"
     unit_of_measurement: "µS/cm"
     icon: mdi:water-sync
     state_class: measurement
@@ -351,7 +351,7 @@ sensor:
 
   - platform: template
     id: sensor_${blueriiot_id_prefix}_chlor
-    name: "${blueriiot_name_prefix} Chlorine"
+    name: "Chlorine"
     unit_of_measurement: "PPM"
     icon: mdi:water-sync
     state_class: measurement
@@ -363,7 +363,7 @@ sensor:
   # --- Capteurs diagnostics (valeurs brutes sans offset de calibration) ---
   - platform: template
     id: sensor_${blueriiot_id_prefix}_ph_brut
-    name: "${blueriiot_name_prefix} pH Brut"
+    name: "pH Brut"
     icon: mdi:ph
     state_class: measurement
     accuracy_decimals: 2
@@ -371,7 +371,7 @@ sensor:
 
   - platform: template
     id: sensor_${blueriiot_id_prefix}_orp_brut
-    name: "${blueriiot_name_prefix} ORP Brut"
+    name: "ORP Brut"
     unit_of_measurement: "mV"
     icon: mdi:molecule-cl
     state_class: measurement
@@ -380,7 +380,7 @@ sensor:
 
   - platform: template
     id: sensor_${blueriiot_id_prefix}_ecs_brut
-    name: "${blueriiot_name_prefix} Conductivite Brute"
+    name: "Conductivite Brute"
     unit_of_measurement: "µS/cm"
     icon: mdi:flash
     state_class: measurement
@@ -393,13 +393,13 @@ sensor:
 text_sensor:
   - platform: template
     id: text_sensor_${blueriiot_id_prefix}_salt
-    name: "${blueriiot_name_prefix} Salinité Statut"
+    name: "Salinité Statut"
   - platform: template
     id: text_sensor_${blueriiot_id_prefix}_ph
-    name: "${blueriiot_name_prefix} pH Statut"
+    name: "pH Statut"
   - platform: template
     id: text_sensor_${blueriiot_id_prefix}_orp
-    name: "${blueriiot_name_prefix} Chlore Libre Statut"
+    name: "Chlore Libre Statut"
   - platform: template
     id: uptime_blueriiot
     name: "Blueriiot last update"
@@ -409,7 +409,7 @@ text_sensor:
   # ----------
   - platform: ble_client
     id: ${blueriiot_id_prefix}_reading_data
-    name: "${blueriiot_name_prefix} reading data"
+    name: "reading data"
     internal: true
     ble_client_id: ble_client_${blueriiot_id_prefix}
     service_uuid: ${blueriiot_recieve_service_uuid}
